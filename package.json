@@ -1,0 +1,19 @@
+{
+  "name": "rksavr",
+  "version": "1.0.0",
+  "description": "Randomized Kolmogorov-Smirnov Analysis of Volatility Roughness",
+  "main": "lib/rksavr.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vite demo",
+    "build": "vite build demo",
+    "preview": "vite preview demo"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  },
+  "dependencies": {
+    "chart.js": "^4.4.0",
+    "plotly.js-dist-min": "^2.35.0"
+  }
+}
