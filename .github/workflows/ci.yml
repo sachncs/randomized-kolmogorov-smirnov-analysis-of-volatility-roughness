@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Run ESLint
+        run: npx eslint lib/ --ext .js
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Verify modules
+        run: |
+          node --check lib/optimization.js
+          node --check lib/stats.js
+          node --check lib/inference.js
+          node --check lib/noise.js
+          node --check lib/rksavr.js
+          node --check lib/models/rbergomi.js
+          node --check lib/models/rfsv.js
+          node --check lib/models/fou.js
+          node --check lib/models/mpre.js
+          node --check lib/models/forecasting.js
+          node --check lib/models/index.js
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npm run build
+        env:
+          CI: true
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7

@@ -7,9 +7,13 @@
   "scripts": {
     "dev": "vite demo",
     "build": "vite build demo",
-    "preview": "vite preview demo"
+    "preview": "vite preview demo",
+    "lint": "eslint lib/ --ext .js",
+    "test": "node --test test/*.test.js"
   },
   "devDependencies": {
+    "eslint": "^10.3.0",
+    "eslint-config-google": "^0.14.0",
     "vite": "^5.0.0"
   },
   "dependencies": {
