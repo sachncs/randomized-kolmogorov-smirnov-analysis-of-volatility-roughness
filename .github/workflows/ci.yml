@@ -41,7 +41,9 @@ jobs:
           node --check lib/optimization.js
           node --check lib/stats.js
           node --check lib/inference.js
-          node --check lib/noise.js
+          node --check lib/inference/math.js
+          node --check lib/inference/asymptotic.js
+          node --check lib/inference/filtering.js
           node --check lib/rksavr.js
           node --check lib/models/rbergomi.js
           node --check lib/models/rfsv.js
@@ -49,6 +51,8 @@ jobs:
           node --check lib/models/mpre.js
           node --check lib/models/forecasting.js
           node --check lib/models/index.js
+
+      - run: npm test
 
   build:
     name: Build

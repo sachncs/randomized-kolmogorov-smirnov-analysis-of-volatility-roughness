@@ -16,8 +16,19 @@ const statusDot = document.getElementById('statusDot');
 const progressBox = document.getElementById('progressBox');
 const progressBar = document.getElementById('progressBar');
 
+const requiredElements = [
+  hurstInput, hurstValueDisplay, lengthInput, windowInput,
+  sampleInput, iterInput, runBtn, avgHDisplay, errorHDisplay,
+  statusText, statusDot, progressBox, progressBar,
+];
+if (requiredElements.some((el) => !el)) {
+  console.error('Missing required DOM elements');
+}
+
 // Worker instance
 let worker = null;
+let workerTimeout = null;
+const WORKER_TIMEOUT_MS = 30000;
 
 // Initialize charts
 const chartConfig = {
@@ -65,23 +76,47 @@ async function runAnalysis() {
 
     // 2. Start Worker
     if (worker) worker.terminate();
+    if (workerTimeout) clearTimeout(workerTimeout);
     worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
 
+    workerTimeout = setTimeout(() => {
+      worker.terminate();
+      statusText.textContent = 'Analysis timed out';
+      runBtn.disabled = false;
+      statusDot.classList.remove('busy');
+    }, WORKER_TIMEOUT_MS);
+
     worker.onmessage = (e) => {
-        const { type, progress, results } = e.data;
-        
+        const { type, progress, results, message } = e.data;
+
         if (type === 'progress') {
             statusText.textContent = `Analyzing (${(progress * 100).toFixed(0)}%)`;
             progressBar.style.width = `${progress * 100}%`;
         } else if (type === 'complete') {
+            clearTimeout(workerTimeout);
             handleCompletion(results, trueH);
+        } else if (type === 'error') {
+            clearTimeout(workerTimeout);
+            statusText.textContent = `Error: ${message || 'Worker failed'}`;
+            runBtn.disabled = false;
+            statusDot.classList.remove('busy');
         }
     };
 
     worker.onerror = (err) => {
+        clearTimeout(workerTimeout);
         console.error('Worker error:', err);
-        statusText.textContent = 'Error in Worker';
+        statusText.textContent = `Worker error: ${err.message || 'unknown'}`;
         runBtn.disabled = false;
+        statusDot.classList.remove('busy');
+    };
+
+    worker.onmessageerror = (err) => {
+        clearTimeout(workerTimeout);
+        console.error('Worker message error:', err);
+        statusText.textContent = 'Worker message deserialization error';
+        runBtn.disabled = false;
+        statusDot.classList.remove('busy');
     };
 
     worker.postMessage({
@@ -98,11 +133,25 @@ function handleCompletion(results, trueH) {
     runBtn.disabled = false;
     progressBox.classList.add('hidden');
 
-    const avgH = results.reduce((a, b) => a + b.H, 0) / results.length;
+    const validResults = results.filter((r) => r.H !== null && Number.isFinite(r.H));
+    const failedCount = results.length - validResults.length;
+
+    if (validResults.length === 0) {
+        statusText.textContent = 'Analysis failed: no valid windows';
+        avgHDisplay.textContent = 'N/A';
+        errorHDisplay.textContent = 'N/A';
+        return;
+    }
+
+    if (failedCount > 0) {
+        statusText.textContent = `Analysis Complete (${failedCount} windows failed)`;
+    }
+
+    const avgH = validResults.reduce((a, b) => a + b.H, 0) / validResults.length;
     avgHDisplay.textContent = avgH.toFixed(3);
     errorHDisplay.textContent = (avgH - trueH).toFixed(3);
 
-    renderResults(results, trueH);
+    renderResults(validResults, trueH);
 }
 
 function renderSeries(series) {
