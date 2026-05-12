@@ -1,5 +1,36 @@
-node_modules/
-dist/
-demo/dist/
+# Logs
+logs
 *.log
+
+# Coverage
+coverage
+.nyc_output
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+.eslintcache
+.cache/
+tmp/
+temp/
+
+# Package artifacts
+*.tgz
+
+# Environment
+.env
+.env.test
+.env.*.local
+
+# IDE
+.idea
+.vscode
+.atom
+
+# OS
 .DS_Store
+
+# Generated experiment outputs
+data/samples/

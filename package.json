@@ -2,22 +2,95 @@
   "name": "rksavr",
   "version": "1.0.0",
   "description": "Randomized Kolmogorov-Smirnov Analysis of Volatility Roughness",
-  "main": "lib/rksavr.js",
   "type": "module",
+  "main": "dist/index.cjs",
+  "browser": "dist/index.iife.js",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
   "scripts": {
     "dev": "vite demo",
-    "build": "vite build demo",
+    "build:demo": "vite build demo",
     "preview": "vite preview demo",
-    "lint": "eslint lib/ --ext .js",
-    "test": "node --test test/*.test.js"
+    "lint": "eslint lib/ tests/ demo/ experiments/ && prettier --check lib/ tests/ demo/ experiments/",
+    "lint:fix": "eslint --fix lib/ tests/ demo/ experiments/ && prettier --write lib/ tests/ demo/ experiments/",
+    "test": "mocha \"tests/**/*.tests.js\"",
+    "test:watch": "npm test -- --watch",
+    "test:coverage": "NODE_ENV=test c8 --all --include=lib/* --reporter=html --reporter=text mocha \"tests/**/*.tests.js\"",
+    "docs": "jsdoc --readme README.md ./lib -r -d ./docs && jsdoc2md './lib/**/*.js' > ./API.md",
+    "build": "rollup --config rollup.dist.config.js",
+    "build:full": "npm run docs && npm run build",
+    "setup": "./scripts/setup.sh",
+    "cleanup": "./scripts/cleanup.sh"
   },
+  "babel": {
+    "presets": [
+      "@babel/env"
+    ],
+    "env": {
+      "test": {
+        "plugins": [
+          "istanbul"
+        ]
+      }
+    }
+  },
+  "nyc": {
+    "sourceMap": false,
+    "instrument": false
+  },
+  "targets": "> 0.25%, not dead",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness.git"
+  },
+  "keywords": [
+    "kolmogorov-smirnov",
+    "hurst",
+    "rough-volatility",
+    "fractional-brownian-motion",
+    "volatility",
+    "statistics"
+  ],
+  "author": "Sachin",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness/issues"
+  },
+  "engines": {
+    "node": ">= 18.x"
+  },
+  "files": [
+    "dist",
+    "API.md",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "devDependencies": {
-    "eslint": "^10.3.0",
-    "eslint-config-google": "^0.14.0",
-    "vite": "^5.0.0"
-  },
-  "dependencies": {
+    "@babel/cli": "^7.23.0",
+    "@babel/core": "^7.23.2",
+    "@babel/preset-env": "^7.23.2",
+    "@babel/register": "^7.22.15",
+    "@rollup/plugin-babel": "^6.0.4",
+    "@rollup/plugin-commonjs": "^25.0.5",
+    "c8": "^8.0.1",
+    "chai": "^4.3.10",
     "chart.js": "^4.4.0",
-    "plotly.js-dist-min": "^2.35.0"
+    "cross-env": "7.0.3",
+    "eslint": "^8.57.1",
+    "eslint-config-google": "^0.14.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.5",
+    "jsdoc": "^4.0.2",
+    "jsdoc-to-markdown": "^8.0.0",
+    "mocha": "^10.2.0",
+    "plotly.js-dist-min": "^2.35.0",
+    "prettier": "^3.8.3",
+    "rollup": "^4.0.2",
+    "vite": "^5.0.0"
   }
 }

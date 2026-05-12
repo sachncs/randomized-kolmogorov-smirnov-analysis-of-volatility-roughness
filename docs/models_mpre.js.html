@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: models/mpre.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: models/mpre.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Multifractional Process with Random Exponent (MPRE).
+ *
+ * A generalization of fBM where H(t) is itself a stochastic process.
+ * X_t = B_{H(t)}(t) where H(t) varies slowly over time and B is fBM.
+ *
+ * Reference: Bianchi, P. et al.
+ * "Multifractional processes with random exponent"
+ *
+ * Google JS Style Guide compliant.
+ */
+
+import { randn } from '../random.js'
+
+/**
+ * Generates MPRE sample paths using approximation.
+ * H evolves as an Ornstein-Uhlenbeck process.
+ * The path is approximated using the local Hölder exponent at each point.
+ *
+ * @param {Object} params Model parameters.
+ * @param {number} params.nSteps Number of time steps.
+ * @param {number} params.T Terminal time.
+ * @param {number} params.hMin Minimum H (default 0.05).
+ * @param {number} params.hMax Maximum H (default 0.95).
+ * @param {number} params.h0 Initial H (default 0.1).
+ * @param {Object} params.hProcess Options for H process dynamics.
+ * @param {number} params.hProcess.theta OU speed.
+ * @param {number} params.hProcess.mu OU mean.
+ * @param {number} params.hProcess.sigma OU volatility.
+ * @param {number} params.x0 Initial value.
+ * @return {{path: Float64Array, hPath: Float64Array, times: Array&lt;number>}}
+ */
+export function mpre (params = {}) {
+  const nSteps = params.nSteps || 252
+  const T = params.T || 1.0
+  const dt = T / nSteps
+  const hMin = params.hMin || 0.05
+  const hMax = params.hMax || 0.95
+  const h0 = params.h0 || 0.1
+  const x0 = params.x0 || 0.0
+
+  const hProcess = params.hProcess || {}
+  const hTheta = hProcess.theta || 1.0
+  const hMu = hProcess.mu || 0.2
+  const hSigma = hProcess.sigma || 0.1
+
+  const times = new Array(nSteps + 1)
+  times[0] = 0
+  for (let t = 1; t &lt;= nSteps; t++) {
+    times[t] = t * dt
+  }
+
+  // Generate H path using Ornstein-Uhlenbeck
+  const hPath = new Float64Array(nSteps + 1)
+  hPath[0] = h0
+
+  const decay = Math.exp(-hTheta * dt)
+  const hNoiseScale = hSigma * Math.sqrt((1 - decay * decay) / (2 * hTheta))
+
+  for (let t = 1; t &lt;= nSteps; t++) {
+    const noise = randn()
+    hPath[t] = hMu + (hPath[t - 1] - hMu) * decay + hNoiseScale * noise
+    hPath[t] = Math.max(hMin, Math.min(hMax, hPath[t]))
+  }
+
+  // Generate MPRE path using local approximation
+  // X_t - X_{t-1} ~ N(0, dt^{2 * H_avg})
+  const path = new Float64Array(nSteps + 1)
+  path[0] = x0
+
+  for (let t = 1; t &lt;= nSteps; t++) {
+    const H = hPath[t]
+    const prevH = hPath[t - 1]
+    const avgH = (H + prevH) / 2
+    const variance = Math.pow(dt, 2 * avgH)
+    path[t] = path[t - 1] + Math.sqrt(variance) * randn()
+  }
+
+  return { path, hPath, times }
+}
+
+/**
+ * MPRE with continuous H evolution using exact fractional representation.
+ * More accurate but O(n^2) - use for short series only.
+ *
+ * @param {Object} params Model parameters.
+ * @param {number} params.nSteps Number of time steps.
+ * @param {number} params.T Terminal time.
+ * @param {number} params.hMin Minimum H.
+ * @param {number} params.hMax Maximum H.
+ * @param {number} params.h0 Initial H.
+ * @param {Object} params.hProcess H process dynamics.
+ * @param {number} params.x0 Initial value.
+ * @return {{path: Float64Array, hPath: Float64Array, times: Array&lt;number>}}
+ */
+export function mpreExact (params = {}) {
+  const nSteps = params.nSteps || 252
+  const T = params.T || 1.0
+  const dt = T / nSteps
+  const hMin = params.hMin || 0.05
+  const hMax = params.hMax || 0.95
+  const h0 = params.h0 || 0.1
+
+  const hProcess = params.hProcess || {}
+  const hTheta = hProcess.theta || 1.0
+  const hMu = hProcess.mu || 0.2
+  const hSigma = hProcess.sigma || 0.1
+
+  const times = new Array(nSteps + 1)
+  times[0] = 0
+  for (let t = 1; t &lt;= nSteps; t++) {
+    times[t] = t * dt
+  }
+
+  // Generate H path
+  const hPath = new Float64Array(nSteps + 1)
+  hPath[0] = h0
+
+  const decay = Math.exp(-hTheta * dt)
+  const hNoiseScale = hSigma * Math.sqrt((1 - decay * decay) / (2 * hTheta))
+
+  for (let t = 1; t &lt;= nSteps; t++) {
+    const noise = randn()
+    hPath[t] = hMu + (hPath[t - 1] - hMu) * decay + hNoiseScale * noise
+    hPath[t] = Math.max(hMin, Math.min(hMax, hPath[t]))
+  }
+
+  // Generate path using time-varying fractional kernel
+  const path = new Float64Array(nSteps + 1)
+  path[0] = 0
+
+  // Pre-generate Brownian increments for the fractional integral
+  const dW = new Float64Array(nSteps)
+  for (let i = 0; i &lt; nSteps; i++) {
+    dW[i] = randn()
+  }
+
+  // Precompute kernels for each time step
+  // K_{H(t)}(u) = c(H) * u^{H(t)-0.5}
+  for (let t = 1; t &lt;= nSteps; t++) {
+    let increment = 0
+
+    for (let j = 0; j &lt; t; j++) {
+      const avgH = (hPath[t] + hPath[j]) / 2
+      const u = (t - j) * dt
+      const kernel = Math.sqrt(2 * avgH) * Math.pow(u, avgH - 0.5)
+      increment += kernel * dW[j]
+    }
+    increment *= Math.sqrt(dt)
+
+    path[t] = path[t - 1] + increment
+  }
+
+  return { path, hPath, times }
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

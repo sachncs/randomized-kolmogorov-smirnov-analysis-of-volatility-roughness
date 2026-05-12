@@ -38,7 +38,6 @@ jobs:
 
       - name: Verify modules
         run: |
-          node --check lib/optimization.js
           node --check lib/stats.js
           node --check lib/inference.js
           node --check lib/inference/math.js

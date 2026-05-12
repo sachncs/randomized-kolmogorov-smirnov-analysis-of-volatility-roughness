@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: inference.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: inference.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Statistical inference for RK-SAVR.
+ * Re-exports from focused submodules for backward compatibility.
+ */
+
+import { random } from './prng.js'
+
+export {
+  asymptoticVariance,
+  standardError,
+  confidenceInterval
+} from './inference/asymptotic.js'
+
+export { kalmanFilter, constancyTest } from './inference/filtering.js'
+
+/**
+ * Computes the asymptotic critical value for the two-sample KS test.
+ * D_alpha = sqrt(-0.5 * ln(alpha/2)) * sqrt((n+m)/(n*m))
+ *
+ * @param {number} n Sample size 1.
+ * @param {number} m Sample size 2.
+ * @param {number} alpha Significance level (default 0.05).
+ * @return {number} Critical value.
+ */
+export function ksCriticalValue (n, m, alpha = 0.05) {
+  if (n &lt;= 0 || m &lt;= 0) throw new Error('Sample sizes must be positive')
+  if (alpha &lt;= 0 || alpha >= 1) throw new Error('alpha must be in (0,1)')
+  const factor = Math.sqrt(-0.5 * Math.log(alpha / 2))
+  const nmFactor = Math.sqrt((n + m) / (n * m))
+  return factor * nmFactor
+}
+
+/**
+ * Approximate p-value for the two-sample KS statistic D.
+ * Uses the asymptotic Kolmogorov distribution approximation.
+ *
+ * @param {number} D Observed KS distance.
+ * @param {number} n Sample size 1.
+ * @param {number} m Sample size 2.
+ * @return {number} Approximate p-value.
+ */
+export function ksPvalue (D, n, m) {
+  if (D &lt; 0) return 1
+  const nm = (n * m) / (n + m)
+  const lambda = (Math.sqrt(nm) + 0.12 + 0.11 / Math.sqrt(nm)) * D
+  // Asymptotic survival function: Q(lambda) = 2 * sum_{j=1}^{inf} (-1)^{j-1} exp(-2 j^2 lambda^2)
+  // Truncated to first 3 terms for numerical stability
+  let sum = 0
+  for (let j = 1; j &lt;= 3; j++) {
+    const sign = (j % 2 === 1) ? 1 : -1
+    sum += sign * Math.exp(-2 * j * j * lambda * lambda)
+  }
+  return Math.max(0, Math.min(1, 2 * sum))
+}
+
+/**
+ * Significance test for the minimized KS distance after H estimation.
+ * Compares the minimized KS statistic D against the asymptotic critical value.
+ *
+ * @param {number} D Minimized KS distance from the estimator.
+ * @param {number} n Sample size at scale A1.
+ * @param {number} m Sample size at scale A2.
+ * @param {number} alpha Significance level (default 0.05).
+ * @return {{significant: boolean, pValue: number, D: number, criticalValue: number}} Test result.
+ */
+export function significanceTest (D, n, m, alpha = 0.05) {
+  if (!Number.isFinite(D) || D &lt; 0) throw new Error('D must be a non-negative finite number')
+  const criticalValue = ksCriticalValue(n, m, alpha)
+  const pValue = ksPvalue(D, n, m)
+  return {
+    significant: pValue &lt; alpha,
+    pValue,
+    D,
+    criticalValue
+  }
+}
+
+/**
+ * CUSUM test for detecting structural breaks in H(t) series.
+ *
+ * @param {Array&lt;number>} hHistory Array of H estimates.
+ * @param {number} targetH Target H under null hypothesis.
+ * @param {number} threshold Threshold for alarm (default 3.0).
+ * @return {{breakDetected: boolean, maxCusum: number, breakIndex: number}} Result.
+ */
+export function cusumTest (hHistory, targetH, threshold = 3.0) {
+  const n = hHistory.length
+  if (n === 0) throw new Error('hHistory must be non-empty')
+
+  const residuals = hHistory.map((h) => h - targetH)
+  const meanRes = residuals.reduce((a, b) => a + b, 0) / n
+  const stdRes = Math.sqrt(residuals.map((r) => (r - meanRes) ** 2).reduce((a, b) => a + b, 0) / n)
+
+  if (stdRes === 0) {
+    return { breakDetected: false, maxCusum: 0, breakIndex: -1 }
+  }
+
+  const standardized = residuals.map((r) => (r - meanRes) / stdRes)
+  let cusum = 0
+  let maxCusum = 0
+  let breakIndex = -1
+
+  for (let i = 0; i &lt; n; i++) {
+    cusum += standardized[i]
+    cusum = Math.max(0, cusum)
+    if (cusum > maxCusum) {
+      maxCusum = cusum
+      breakIndex = i
+    }
+  }
+
+  return {
+    breakDetected: maxCusum > threshold,
+    maxCusum,
+    breakIndex
+  }
+}
+
+/**
+ * Detects breakpoints in a time series of H estimates using
+ * a sliding window CUSUM approach.
+ *
+ * @param {Array&lt;number>} hHistory Array of H estimates.
+ * @param {number} windowSize Sliding window size.
+ * @param {number} threshold CUSUM threshold.
+ * @return {Array&lt;{index: number, H_before: number, H_after: number}>} Detected breakpoints.
+ */
+export function detectBreakpoints (hHistory, windowSize = 50, threshold = 3.0) {
+  const breakpoints = []
+  for (let i = windowSize; i &lt; hHistory.length - windowSize; i++) {
+    const before = hHistory.slice(i - windowSize, i)
+    const after = hHistory.slice(i, i + windowSize)
+    const meanBefore = before.reduce((a, b) => a + b, 0) / before.length
+    const meanAfter = after.reduce((a, b) => a + b, 0) / after.length
+    const stdBefore = Math.sqrt(before.map((x) => (x - meanBefore) ** 2).reduce((a, b) => a + b, 0) / before.length)
+
+    if (stdBefore === 0) continue
+
+    const cusumResult = cusumTest(after, meanBefore, threshold)
+    if (cusumResult.breakDetected) {
+      breakpoints.push({
+        index: i,
+        H_before: meanBefore,
+        H_after: meanAfter
+      })
+    }
+  }
+  return breakpoints
+}
+
+/**
+ * Bootstrap confidence interval for H estimate.
+ *
+ * @param {function(Array&lt;number>): number} estimator Function that estimates H from a window.
+ * @param {Array&lt;number>} window Data window.
+ * @param {number} nBoot Number of bootstrap samples.
+ * @param {number} alpha Significance level.
+ * @return {{lower: number, upper: number, pointEstimate: number}} CI.
+ */
+export function bootstrapCI (estimator, window, nBoot = 1000, alpha = 0.05) {
+  if (!window || window.length === 0) throw new Error('window must be non-empty')
+  const pointEstimate = estimator(window)
+  const bootEstimates = []
+
+  for (let b = 0; b &lt; nBoot; b++) {
+    // Resample with replacement
+    const sample = []
+    for (let i = 0; i &lt; window.length; i++) {
+      const idx = Math.floor(random() * window.length)
+      sample.push(window[idx])
+    }
+    try {
+      bootEstimates.push(estimator(sample))
+    } catch (_err) {
+      // Skip failed bootstrap iterations
+    }
+  }
+
+  bootEstimates.sort((a, b) => a - b)
+  const lowerIdx = Math.floor((alpha / 2) * bootEstimates.length)
+  const upperIdx = Math.floor((1 - alpha / 2) * bootEstimates.length)
+
+  return {
+    lower: bootEstimates[lowerIdx] || pointEstimate,
+    upper: bootEstimates[upperIdx] || pointEstimate,
+    pointEstimate
+  }
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

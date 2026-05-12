@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: models/forecasting.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: models/forecasting.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * H-Forecasting module for predicting future volatility roughness.
+ * Includes ARFIMA models and simple neural network approaches.
+ *
+ * Google JS Style Guide compliant.
+ */
+
+/**
+ * ARFIMA(p, d, q) model for fractional differencing.
+ *
+ * The ARFIMA model combines autoregressive (AR) and moving average (MA)
+ * terms with fractional differencing (d) to capture long-memory processes.
+ *
+ * @param {Object} opts Model parameters.
+ * @param {number} opts.p AR order.
+ * @param {number} opts.d Differencing parameter (fractional).
+ * @param {number} opts.q MA order.
+ * @param {number} opts.window Window size for rolling forecasts.
+ * @return {function(Array&lt;number>): number} Forecasting function.
+ */
+export function arfima (opts = {}) {
+  const p = opts.p || 1
+  const d = opts.d || 0.3
+  const q = opts.q || 1
+  const windowSize = opts.window || 100
+
+  return function forecast (hHistory) {
+    const n = hHistory.length
+    if (n &lt; windowSize) {
+      return hHistory.reduce((a, b) => a + b, 0) / n
+    }
+
+    const recent = hHistory.slice(n - windowSize)
+    const diffSeries = fractionalDifference(recent, d)
+    const diffLen = diffSeries.length
+
+    let prediction = 0
+
+    // AR component
+    for (let i = 0; i &lt; Math.min(p, 3); i++) {
+      const idx = diffLen - 1 - i
+      if (idx >= 0 &amp;&amp; idx &lt; diffLen) {
+        prediction += 0.3 * diffSeries[idx]
+      }
+    }
+
+    // MA component (simple lag-based)
+    for (let i = 0; i &lt; Math.min(q, 3); i++) {
+      const idx = diffLen - 1 - i
+      if (idx >= 0 &amp;&amp; idx &lt; diffLen) {
+        prediction += 0.1 * (recent[idx] - prediction)
+      }
+    }
+
+    return Math.max(0.01, Math.min(0.99, prediction))
+  }
+}
+
+/**
+ * Holt-Winters exponential smoothing forecast.
+ *
+ * @param {Array&lt;number>} series Input time series.
+ * @param {number} alpha Level smoothing factor (default 0.3).
+ * @param {number} beta Trend smoothing factor (default 0.1).
+ * @return {number} One-step ahead forecast.
+ */
+export function holtWintersForecast (series, alpha = 0.3, beta = 0.1) {
+  if (!series || series.length === 0) throw new Error('series must be non-empty')
+  if (alpha &lt; 0 || alpha > 1) throw new Error('alpha must be in [0,1]')
+  if (beta &lt; 0 || beta > 1) throw new Error('beta must be in [0,1]')
+
+  let level = series[0]
+  let trend = series.length > 1 ? series[1] - series[0] : 0
+
+  for (let i = 1; i &lt; series.length; i++) {
+    const value = series[i]
+    const newLevel = alpha * value + (1 - alpha) * (level + trend)
+    const newTrend = beta * (newLevel - level) + (1 - beta) * trend
+    level = newLevel
+    trend = newTrend
+  }
+
+  return level + trend
+}
+
+/**
+ * Creates a minimal LSTM-like recurrent cell for H forecasting.
+ * Stateless: processes a full sequence and produces a hidden state.
+ *
+ * @param {Object} opts
+ * @param {number} opts.hiddenSize Hidden state dimension (default 16).
+ * @param {number} opts.inputSize Input dimension (default 1).
+ * @return {{predict: function(Array&lt;number>): Array&lt;number>}} LSTM-like predictor.
+ */
+export function createLSTM (opts = {}) {
+  const hiddenSize = opts.hiddenSize || 16
+  const inputSize = opts.inputSize || 1
+
+  // Xavier-like initialization for weights
+  const xavier = (rows, cols) => {
+    const scale = Math.sqrt(2.0 / (rows + cols))
+    const arr = new Array(rows)
+    for (let i = 0; i &lt; rows; i++) {
+      arr[i] = new Array(cols)
+      for (let j = 0; j &lt; cols; j++) {
+        arr[i][j] = (Math.random() * 2 - 1) * scale
+      }
+    }
+    return arr
+  }
+
+  const Wf = xavier(hiddenSize, inputSize + hiddenSize)
+  const Wi = xavier(hiddenSize, inputSize + hiddenSize)
+  const Wc = xavier(hiddenSize, inputSize + hiddenSize)
+  const Wo = xavier(hiddenSize, inputSize + hiddenSize)
+  const bf = new Array(hiddenSize).fill(0)
+  const bi = new Array(hiddenSize).fill(0)
+  const bc = new Array(hiddenSize).fill(0)
+  const bo = new Array(hiddenSize).fill(0)
+
+  const sigmoid = (x) => 1 / (1 + Math.exp(-x))
+  const tanh = (x) => Math.tanh(x)
+
+  const step = (x, hPrev, cPrev) => {
+    const concat = [x, ...hPrev]
+    const f = new Array(hiddenSize)
+    const iGate = new Array(hiddenSize)
+    const cTilde = new Array(hiddenSize)
+    const o = new Array(hiddenSize)
+
+    for (let j = 0; j &lt; hiddenSize; j++) {
+      let sumF = bf[j]
+      let sumI = bi[j]
+      let sumC = bc[j]
+      let sumO = bo[j]
+      for (let k = 0; k &lt; concat.length; k++) {
+        sumF += Wf[j][k] * concat[k]
+        sumI += Wi[j][k] * concat[k]
+        sumC += Wc[j][k] * concat[k]
+        sumO += Wo[j][k] * concat[k]
+      }
+      f[j] = sigmoid(sumF)
+      iGate[j] = sigmoid(sumI)
+      cTilde[j] = tanh(sumC)
+      o[j] = sigmoid(sumO)
+    }
+
+    const c = new Array(hiddenSize)
+    const h = new Array(hiddenSize)
+    for (let j = 0; j &lt; hiddenSize; j++) {
+      c[j] = f[j] * cPrev[j] + iGate[j] * cTilde[j]
+      h[j] = o[j] * tanh(c[j])
+    }
+
+    return { h, c }
+  }
+
+  return {
+    predict: (series) => {
+      if (!series || series.length === 0) throw new Error('series must be non-empty')
+      let h = new Array(hiddenSize).fill(0)
+      let c = new Array(hiddenSize).fill(0)
+      for (const x of series) {
+        const result = step(x, h, c)
+        h = result.h
+        c = result.c
+      }
+      return h
+    }
+  }
+}
+
+/**
+ * Creates a minimal Transformer-style attention model for H forecasting.
+ * Stateless: processes a full sequence and produces an aggregated hidden state.
+ *
+ * @param {Object} opts
+ * @param {number} opts.hiddenSize Hidden dimension (default 16).
+ * @param {number} opts.numHeads Number of attention heads (default 4).
+ * @return {{predict: function(Array&lt;number>): Array&lt;number>}} Attention predictor.
+ */
+export function createAttentionModel (opts = {}) {
+  const hiddenSize = opts.hiddenSize || 16
+  // numHeads is accepted for API compatibility but not used in this minimal implementation
+
+  const xavier = (rows, cols) => {
+    const scale = Math.sqrt(2.0 / (rows + cols))
+    const arr = new Array(rows)
+    for (let i = 0; i &lt; rows; i++) {
+      arr[i] = new Array(cols)
+      for (let j = 0; j &lt; cols; j++) {
+        arr[i][j] = (Math.random() * 2 - 1) * scale
+      }
+    }
+    return arr
+  }
+
+  const Wq = xavier(hiddenSize, hiddenSize)
+  const Wk = xavier(hiddenSize, hiddenSize)
+  const Wv = xavier(hiddenSize, hiddenSize)
+  const Wo = xavier(hiddenSize, hiddenSize)
+
+  const softmax = (vec) => {
+    const maxVal = Math.max(...vec)
+    const exps = vec.map((v) => Math.exp(v - maxVal))
+    const sum = exps.reduce((a, b) => a + b, 0)
+    return exps.map((v) => v / sum)
+  }
+
+  const matVecMul = (mat, vec) => {
+    const result = new Array(mat.length)
+    for (let i = 0; i &lt; mat.length; i++) {
+      let sum = 0
+      for (let j = 0; j &lt; vec.length; j++) {
+        sum += mat[i][j] * vec[j]
+      }
+      result[i] = sum
+    }
+    return result
+  }
+
+  return {
+    predict: (series) => {
+      if (!series || series.length === 0) throw new Error('series must be non-empty')
+      // Project each input to hidden dimension via simple linear projection
+      const projected = series.map((x) => {
+        const vec = new Array(hiddenSize)
+        for (let i = 0; i &lt; hiddenSize; i++) {
+          vec[i] = x * ((i % 2 === 0) ? 1 : 0.1) + (i * 0.01)
+        }
+        return vec
+      })
+
+      // Self-attention over the projected sequence
+      const queries = projected.map((p) => matVecMul(Wq, p))
+      const keys = projected.map((p) => matVecMul(Wk, p))
+      const values = projected.map((p) => matVecMul(Wv, p))
+
+      const n = projected.length
+      const output = new Array(hiddenSize).fill(0)
+
+      for (let i = 0; i &lt; n; i++) {
+        const scores = new Array(n)
+        for (let j = 0; j &lt; n; j++) {
+          let dot = 0
+          for (let d = 0; d &lt; hiddenSize; d++) {
+            dot += queries[i][d] * keys[j][d]
+          }
+          scores[j] = dot / Math.sqrt(hiddenSize)
+        }
+        const weights = softmax(scores)
+        for (let j = 0; j &lt; n; j++) {
+          for (let d = 0; d &lt; hiddenSize; d++) {
+            output[d] += weights[j] * values[j][d]
+          }
+        }
+      }
+
+      // Final linear projection and average across sequence length
+      const result = matVecMul(Wo, output)
+      for (let i = 0; i &lt; hiddenSize; i++) {
+        result[i] /= n
+      }
+      return result
+    }
+  }
+}
+
+/**
+ * Computes fractional difference of a series.
+ * (1-L)^d X_t = sum_{k=0}^{infty} binomial(d, k) (-1)^k X_{t-k}
+ *
+ * @param {Array&lt;number>} data Input series.
+ * @param {number} d Differencing parameter.
+ * @param {number} lag Maximum lag for approximation.
+ * @return {Array&lt;number>} Fractionally differenced series.
+ */
+const _binomialCache = new Map()
+const _binomialCacheKeys = []
+const MAX_BINOMIAL_CACHE = 100
+
+function getBinomialCoeffs (d, lag) {
+  const key = `${d}:${lag}`
+  let coeffs = _binomialCache.get(key)
+  if (!coeffs) {
+    coeffs = new Float64Array(lag + 1)
+    coeffs[0] = 1
+    for (let k = 1; k &lt;= lag; k++) {
+      coeffs[k] = coeffs[k - 1] * (d - k + 1) / k
+    }
+    if (_binomialCache.size >= MAX_BINOMIAL_CACHE &amp;&amp; _binomialCacheKeys.length > 0) {
+      const oldest = _binomialCacheKeys.shift()
+      _binomialCache.delete(oldest)
+    }
+    _binomialCache.set(key, coeffs)
+    _binomialCacheKeys.push(key)
+  }
+  return coeffs
+}
+
+function fractionalDifference (data, d, lag = 50) {
+  const n = data.length
+  const result = new Array(n)
+
+  // Precompute binomial coefficients (cached for repeated calls)
+  const coeffs = getBinomialCoeffs(d, lag)
+
+  for (let t = 0; t &lt; n; t++) {
+    let sum = 0
+    let sign = 1
+    for (let k = 0; k &lt;= Math.min(t, lag); k++) {
+      sum += sign * coeffs[k] * data[t - k]
+      sign = -sign
+    }
+    result[t] = sum
+  }
+
+  return result
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

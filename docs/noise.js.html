@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: noise.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: noise.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Microstructure noise correction utilities for RK-SAVR.
+ * Implements preaveraging, realized kernels, and log-volatility de-biasing.
+ */
+
+/**
+ * Preaveraging of returns to reduce microstructure noise.
+ * Computes local averages of returns over a sliding window,
+ * then differences these averages to obtain noise-robust returns.
+ *
+ * @param {Array&lt;number>} prices Price series.
+ * @param {number} windowSize Preaveraging window (default 2).
+ * @return {Array&lt;number>} Preaveraged returns.
+ */
+export function preavgReturns (prices, windowSize = 2) {
+  if (!prices || prices.length &lt; windowSize + 1) {
+    throw new Error('prices array too short for preaveraging window')
+  }
+
+  const n = prices.length
+  const returns = []
+  for (let i = 1; i &lt; n; i++) {
+    returns.push(Math.log(prices[i] / prices[i - 1]))
+  }
+
+  const avgReturns = []
+  for (let i = 0; i &lt;= returns.length - windowSize; i++) {
+    let sum = 0
+    for (let j = 0; j &lt; windowSize; j++) {
+      sum += returns[i + j]
+    }
+    avgReturns.push(sum / windowSize)
+  }
+
+  // Differences of averaged returns
+  const result = []
+  for (let i = 1; i &lt; avgReturns.length; i++) {
+    result.push(avgReturns[i] - avgReturns[i - 1])
+  }
+
+  return result
+}
+
+/**
+ * Realized kernel volatility estimator with Bartlett or other kernels.
+ *
+ * @param {Array&lt;number>} returns Return series.
+ * @param {string} kernelType Kernel type: 'bartlett', 'parzen', 'tukey-hanning'.
+ * @param {number} bandwidth Maximum lag (default auto).
+ * @return {number} Realized kernel estimate.
+ */
+export function realizedKernel (returns, kernelType = 'bartlett', bandwidth = null) {
+  if (!returns || returns.length === 0) throw new Error('returns must be non-empty')
+
+  const n = returns.length
+  const h = bandwidth || Math.floor(Math.pow(n, 0.6))
+  const gamma = []
+
+  for (let k = 0; k &lt;= h; k++) {
+    let sum = 0
+    for (let i = k; i &lt; n; i++) {
+      sum += returns[i] * returns[i - k]
+    }
+    gamma.push(sum)
+  }
+
+  let rv = gamma[0]
+  for (let k = 1; k &lt;= h; k++) {
+    const w = _kernelWeight(kernelType, k, h)
+    rv += 2 * w * gamma[k]
+  }
+
+  return Math.max(0, rv)
+}
+
+/**
+ * Kernel weight function.
+ * @private
+ * @param {string} type
+ * @param {number} k
+ * @param {number} h
+ * @return {number}
+ */
+function _kernelWeight (type, k, h) {
+  const x = k / h
+  switch (type) {
+    case 'bartlett':
+      return 1 - x
+    case 'parzen':
+      if (x &lt;= 0.5) return 1 - 6 * x * x + 6 * x * x * x
+      return 2 * Math.pow(1 - x, 3)
+    case 'tukey-hanning':
+      return 0.5 * (1 + Math.cos(Math.PI * x))
+    default:
+      return 1 - x
+  }
+}
+
+/**
+ * De-biases log-volatility H estimates by correcting for
+ * observational noise in the volatility proxy.
+ *
+ * @param {Array&lt;number>} rawHEstimates Raw H estimates.
+ * @param {number} sigmaObs Observed volatility standard deviation.
+ * @param {number} sigmaLatent Latent volatility standard deviation.
+ * @return {Array&lt;number>} De-biased H estimates.
+ */
+export function logVolDebias (rawHEstimates, sigmaObs, sigmaLatent) {
+  if (!rawHEstimates || rawHEstimates.length === 0) return []
+  if (sigmaLatent &lt;= 0) throw new Error('sigmaLatent must be positive')
+
+  const noiseRatio = sigmaObs / sigmaLatent
+  // Heuristic: roughness is attenuated by noise; add small positive correction
+  const correction = Math.log(noiseRatio) * 0.01
+
+  return rawHEstimates.map((h) => {
+    const debiased = h + correction
+    return Math.max(0.01, Math.min(0.99, debiased))
+  })
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>
