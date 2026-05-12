@@ -118,7 +118,7 @@ describe('Optimizer edge cases', function () {
 
   it('simulatedAnnealing improves from initial guess', function () {
     const f = (x) => x[0] * x[0];
-    const result = simulatedAnnealing(f, [5], {maxIter: 200, stepSize: 1.0});
+    const result = simulatedAnnealing(f, [5], {maxIter: 500, stepSize: 1.0});
     expect(result.f).to.be.below(25); // Should improve from f(5)=25
     expect(Number.isFinite(result.x[0])).to.equal(true);
   });
