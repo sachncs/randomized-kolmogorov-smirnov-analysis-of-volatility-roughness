@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: data/synthetic.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: data/synthetic.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Synthetic data generators for VIX and S&amp;P 500 style experiments.
+ * Produces realistic-looking volatility data with known roughness properties.
+ */
+
+import { generateFBM } from '../random.js'
+import { setSeed, resetSeed, random } from '../prng.js'
+
+/**
+ * Generates synthetic VIX-style daily log-volatility.
+ * Uses fractional Brownian motion with H ~ 0.1 and realistic drift/noise.
+ * This ensures the generated series has the exact target Hurst parameter
+ * for estimator validation.
+ *
+ * @param {number} nDays Number of trading days.
+ * @param {number} h Hurst parameter (default 0.1 for VIX).
+ * @param {Object} opts Options.
+ * @param {number} opts.seed PRNG seed for reproducibility.
+ * @param {number} opts.noiseStd Observation noise standard deviation.
+ * @param {number} opts.drift Log-volatility drift.
+ * @return {Array&lt;number>} Daily log-volatility series.
+ */
+export function generateVIXLogVol (nDays, h = 0.1, opts = {}) {
+  if (nDays &lt;= 0) return []
+  if (h &lt;= 0 || h >= 1) throw new Error('h must be in (0, 1)')
+
+  if (opts.seed !== undefined) setSeed(opts.seed)
+
+  const fbm = generateFBM(nDays, h)
+  const noiseStd = opts.noiseStd || 0.05
+  const drift = opts.drift || 0.02
+
+  // VIX log-vol: mean ~ 2.0 (vol ~ 20%), with rough fBM component
+  const logVol = fbm.map((v) => {
+    const noise = (random() * 2 - 1) * noiseStd
+    return 2.0 + drift * (v / Math.sqrt(nDays)) + v * 0.5 + noise
+  })
+
+  if (opts.seed !== undefined) resetSeed()
+  return logVol
+}
+
+/**
+ * Generates synthetic S&amp;P 500 realized volatility style data.
+ * Uses fractional Brownian motion with H ~ 0.14 (empirical estimate from paper).
+ *
+ * @param {number} nDays Number of trading days.
+ * @param {number} h Hurst parameter (default 0.14 for SPX RV).
+ * @param {Object} opts Options.
+ * @param {number} opts.seed PRNG seed.
+ * @param {number} opts.noiseStd Observation noise.
+ * @param {number} opts.drift Log-volatility drift.
+ * @return {Array&lt;number>} Daily log-volatility series.
+ */
+export function generateSPXLogVol (nDays, h = 0.14, opts = {}) {
+  if (nDays &lt;= 0) return []
+  if (h &lt;= 0 || h >= 1) throw new Error('h must be in (0, 1)')
+
+  if (opts.seed !== undefined) setSeed(opts.seed)
+
+  const fbm = generateFBM(nDays, h)
+  const noiseStd = opts.noiseStd || 0.03
+  const drift = opts.drift || 0.015
+
+  // SPX log-vol: mean ~ 1.5 (vol ~ 15%), slightly smoother than VIX
+  const logVol = fbm.map((v) => {
+    const noise = (random() * 2 - 1) * noiseStd
+    return 1.5 + drift * (v / Math.sqrt(nDays)) + v * 0.4 + noise
+  })
+
+  if (opts.seed !== undefined) resetSeed()
+  return logVol
+}
+
+/**
+ * Generates synthetic intraday 5-minute prices for RV computation testing.
+ * Uses a simple rough volatility + Brownian motion model.
+ *
+ * @param {number} nIntraday Number of 5-minute intervals per day (default 78 for US equities).
+ * @param {number} nDays Number of trading days.
+ * @param {number} h Hurst parameter.
+ * @param {Object} opts Options.
+ * @param {number} opts.seed PRNG seed.
+ * @param {number} opts.drift Annualized drift.
+ * @return {Array&lt;Array&lt;number>>} Array of daily price arrays.
+ */
+export function generateIntradayPrices (nIntraday = 78, nDays = 1, h = 0.1, opts = {}) {
+  if (nIntraday &lt;= 0 || nDays &lt;= 0) return []
+  if (h &lt;= 0 || h >= 1) throw new Error('h must be in (0, 1)')
+
+  if (opts.seed !== undefined) setSeed(opts.seed)
+
+  const dt = 1 / (252 * nIntraday) // Daily fraction per 5-min bar
+  const drift = (opts.drift || 0.05) * dt
+  const days = []
+
+  for (let d = 0; d &lt; nDays; d++) {
+    const fbm = generateFBM(nIntraday, h)
+    const prices = [100] // Start price
+    for (let i = 1; i &lt; nIntraday; i++) {
+      const vol = Math.exp(fbm[i] * 0.5)
+      const ret = drift + vol * (random() * 2 - 1) * Math.sqrt(dt)
+      prices.push(prices[i - 1] * Math.exp(ret))
+    }
+    days.push(prices)
+  }
+
+  if (opts.seed !== undefined) resetSeed()
+  return days
+}
+
+/**
+ * Exports a series as CSV string.
+ *
+ * @param {Array&lt;{date: string|Date, value: number}>} series Time series.
+ * @param {string} dateHeader Header for date column.
+ * @param {string} valueHeader Header for value column.
+ * @return {string} CSV string.
+ */
+export function seriesToCSV (series, dateHeader = 'date', valueHeader = 'value') {
+  if (!Array.isArray(series)) throw new Error('series must be an array')
+  const lines = [`${dateHeader},${valueHeader}`]
+  for (const point of series) {
+    const dateStr = point.date instanceof Date
+      ? point.date.toISOString().split('T')[0]
+      : String(point.date)
+    lines.push(`${dateStr},${point.value}`)
+  }
+  return lines.join('\n')
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

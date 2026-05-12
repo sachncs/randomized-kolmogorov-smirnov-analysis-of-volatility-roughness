@@ -8,14 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **CI Pipeline** (`.github/workflows/ci.yml`): GitHub Actions workflow with lint, test, and build jobs.
-- **ESLint Configuration** (`eslint.config.js`): ESLint 10 flat config with basic rules.
-- **Test Suite** (`test/rksavr.test.js`): Node.js native test runner with 10 tests covering core functionality.
+
+#### Production Package Infrastructure
+- **Build System** (`rollup.dist.config.js`): Rollup with Babel producing ESM, ES5, CJS, and IIFE bundles.
+- **Dual-Format Publishing** (`package.json`): Conditional exports for `import` and `require`, `files` whitelist, zero runtime dependencies.
+- **StandardJS Linting**: Replaced ESLint with `standard` + `snazzy` for zero-config linting.
+- **Test Framework Migration** (`tests/`): Mocha + Chai with `@babel/register`, `.mocharc.yml`, and 123 tests.
+- **Coverage** (`npm run test:coverage`): c8 with HTML/text reporters, 93.56% statement coverage.
+- **Documentation** (`npm run docs`): JSDoc HTML (`docs/`) and `API.md` via `jsdoc-to-markdown`.
+- **CI/CD** (`.github/workflows/`):
+  - `testsuite.yml`: Matrix testing on Node 18/20/22 with lint + test + coverage.
+  - `publish.yml`: Docs + build + dry-run publish.
+  - `codeql-analysis.yml`: Security analysis.
+- **Community Files**: `LICENSE`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, issue/PR templates, `FUNDING.yml`, `dependabot.yml`.
+
+#### Paper Fidelity & Core Fixes
+- **Asymptotic Variance** (`lib/inference/asymptotic.js`): Corrected to Proposition 2.9 formula `(2πe)/(ln a)² · (1/√n + 1/√m)²`.
+- **Block Random Permutation** (`lib/stats.js`): Paper-faithful implementation with optional random phase offset, preserving marginal distributions while stripping autocorrelation.
+- **Configurable H Bounds** (`lib/rksavr.js`): `hMin`/`hMax` constructor options passed to optimizers and clamped on results.
+- **KS Significance Testing** (`lib/inference.js`): `ksCriticalValue`, `ksPvalue`, and `significanceTest` using asymptotic Kolmogorov distribution.
+- **Constancy Test** (`lib/inference/filtering.js`): Likelihood ratio test for Kalman `q=0` vs `q>0`.
+- **Bootstrap CI** (`lib/inference.js`): Non-parametric bootstrap with seeded PRNG for reproducibility.
+- **CUSUM / Breakpoint Detection** (`lib/inference.js`): Structural break detection in H(t) series.
+
+#### Algorithmic Optimizations
+- **Zero-Allocation Rescaled KS** (`lib/stats.js:ksDistanceRescaled`): Applies `scale^(-H)` inline during the pointer walk — eliminates two array allocations per optimizer evaluation.
+- **Fixed `getIncrementsMulti`** (`lib/rksavr.js`): Replaced buggy single-pass loop with correct per-scale computation.
+- **`estimateSingleWithDiagnostics`** (`lib/rksavr.js`): Returns both H and minimized KS distance D.
+
+#### Restored Modules
+- **Noise Correction** (`lib/noise.js`): `preavgReturns`, `realizedKernel` (Bartlett/Parzen/Tukey-Hanning), `logVolDebias`.
+- **Forecasting** (`lib/models/forecasting.js`): `holtWintersForecast`, `createLSTM` (16/8-dim, Xavier init, full gates), `createAttentionModel` (Q/K/V self-attention).
+- **Central Export Hub** (`lib/index.js`): Single entry point re-exporting all public APIs.
 
 ### Changed
-- **Nelder-Mead Fix** (`lib/optimization.js`): Fixed scope bug in return statement causing `sortedPts`/`sortedF` undefined errors.
-- **AGS Optimizer** (`lib/rksavr.js`): Fixed adaptive grid search call signature to pass `max` as upper bound instead of array.
-- **Model Index** (`lib/models/index.js`): Added explicit imports for `no-undef` compliance in default export.
+- **CJS Bundle**: Renamed to `dist/index.cjs` so `require()` works under `"type": "module"`.
+- **Demo Dependencies**: `chart.js` and `plotly.js-dist-min` moved from `dependencies` to `devDependencies`.
+- **README.md**: Updated repo links, added development workflow, testing, building, and publishing sections.
+
+### Fixed
+- `significanceTest` no longer approximates D from variance; it requires the actual minimized KS distance.
+- `blockPermutation` random phase no longer drops prefix elements when offset > 0.
+- `bootstrapCI` now uses the seeded PRNG instead of `Math.random()`.
+- Removed stale `dist/index.cjs.js` build artifacts.
+
+### Removed
+- **ESLint**: Replaced by StandardJS (`standard`).
+- **Node.js Native Test Runner**: Replaced by Mocha + Chai.
+- **`test/rksavr.test.js`**: Migrated to `tests/rksavr.tests.js`.
 
 ## [1.1.0] - 2026-05-04
 
@@ -35,13 +75,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Optimizer Selection**: `optimizerType` config option ('brent', 'nelder-mead', 'annealing', 'de', 'ags').
 
 #### Statistical Robustness (Section 2)
-- **Asymptotic Variance** (`lib/inference.js:asymptoticVariance`): Prop 2.9 formula $\frac{2\pi e}{(2\ln a)^2}(\frac{1}{n}+\frac{1}{m})$.
+- **Asymptotic Variance** (`lib/inference.js:asymptoticVariance`): Prop 2.9 formula $\frac{2\pi e}{(\ln a)^2}(\frac{1}{\sqrt{n}}+\frac{1}{\sqrt{m}})^2$.
 - **Standard Error & CI** (`lib/inference.js:standardError`, `confidenceInterval`): Analytic confidence intervals.
 - **Bootstrap CI** (`lib/inference.js:bootstrapCI`): Non-parametric empirical confidence intervals.
 - **Kalman Filter** (`lib/inference.js:kalmanFilter`): State-space filtering for temporal H variation.
 - **CUSUM Test** (`lib/inference.js:cusumTest`): Structural break detection in H series.
 - **Breakpoint Detection** (`lib/inference.js:detectBreakpoints`): Binary segmentation for regime identification.
-- **Constancy Test** (`lib/inference.js:constancyTest`): Running window variance ratio test.
+- **Constancy Test** (`lib/inference.js:constancyTest`): Likelihood ratio test for Kalman $q=0$ vs $q>0$.
 - **Preaveraging** (`lib/noise.js:preavgReturns`): Noise mitigation via overlapping returns.
 - **Realized Kernel** (`lib/noise.js:realizedKernel`): Bartlett/Parzen/Tukey kernel volatility.
 - **Multiscale Decomposition** (`lib/noise.js:multiscaleDecompose`): Trend/noise separation.

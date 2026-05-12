@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: data/preprocess.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: data/preprocess.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Preprocessing pipeline for realized volatility and log-transformation.
+ * Pure JavaScript implementation matching the paper's data preparation.
+ */
+
+/**
+ * Computes 5-minute realized volatility from intraday log-returns.
+ * RV = sum_i (r_i)^2 where r_i = log(P_{t_i}) - log(P_{t_{i-1}})
+ *
+ * @param {Array&lt;number>} prices Price series (chronological order).
+ * @param {number} interval Number of observations per 5-min bucket (default 1 if prices are already 5-min).
+ * @return {Array&lt;number>} Realized volatility series.
+ */
+export function computeRV (prices, interval = 1) {
+  if (!Array.isArray(prices)) throw new Error('prices must be an array')
+  if (prices.length &lt; 2) throw new Error('prices must have at least 2 points')
+  if (prices.some((p) => p &lt;= 0 || !Number.isFinite(p))) {
+    throw new Error('prices must be positive finite numbers')
+  }
+  if (interval &lt;= 0 || !Number.isInteger(interval)) throw new Error('interval must be a positive integer')
+
+  const logPrices = prices.map((p) => Math.log(p))
+  const returns = []
+  for (let i = 1; i &lt; logPrices.length; i++) {
+    returns.push(logPrices[i] - logPrices[i - 1])
+  }
+
+  const rv = []
+  for (let i = 0; i &lt; returns.length; i += interval) {
+    let sumSq = 0
+    const end = Math.min(i + interval, returns.length)
+    for (let j = i; j &lt; end; j++) {
+      sumSq += returns[j] * returns[j]
+    }
+    rv.push(sumSq)
+  }
+
+  return rv
+}
+
+/**
+ * Computes 5-minute RV from OHLC bars using the Parkinson estimator.
+ * More efficient than tick-based RV when only OHLC is available.
+ *
+ * @param {Array&lt;{open: number, high: number, low: number, close: number}>} bars OHLC bars.
+ * @return {Array&lt;number>} RV estimates.
+ */
+export function computeRVParkinson (bars) {
+  if (!Array.isArray(bars)) throw new Error('bars must be an array')
+  if (bars.length === 0) return []
+
+  const rv = []
+  for (const bar of bars) {
+    if (bar.high &lt;= 0 || bar.low &lt;= 0 || !Number.isFinite(bar.high) || !Number.isFinite(bar.low)) {
+      throw new Error('OHLC bars must have positive finite high/low values')
+    }
+    const hl = Math.log(bar.high / bar.low)
+    rv.push(hl * hl / (4 * Math.log(2)))
+  }
+  return rv
+}
+
+/**
+ * Computes daily realized volatility from intraday 5-minute RVs.
+ * Aggregates intraday RVs into a single daily RV figure.
+ *
+ * @param {Array&lt;number>} intradayRVs Array of 5-minute RVs for one trading day.
+ * @return {number} Daily realized volatility.
+ */
+export function aggregateDailyRV (intradayRVs) {
+  if (!Array.isArray(intradayRVs)) throw new Error('intradayRVs must be an array')
+  if (intradayRVs.length === 0) return 0
+  return intradayRVs.reduce((a, b) => a + b, 0)
+}
+
+/**
+ * Applies log-transformation to a volatility series.
+ * The paper uses log-volatility: X_t = log(sqrt(RV_t))
+ *
+ * @param {Array&lt;number>} rv Realized volatility series.
+ * @return {Array&lt;number>} Log-volatility series.
+ */
+export function logTransform (rv) {
+  if (!Array.isArray(rv)) throw new Error('rv must be an array')
+  if (rv.some((v) => v &lt;= 0 || !Number.isFinite(v))) {
+    throw new Error('rv must contain positive finite values')
+  }
+  return rv.map((v) => 0.5 * Math.log(v))
+}
+
+/**
+ * Removes the mean (centers) a time series.
+ *
+ * @param {Array&lt;number>} series Input series.
+ * @return {Array&lt;number>} Centered series.
+ */
+export function centerSeries (series) {
+  if (!Array.isArray(series) || series.length === 0) return []
+  const mean = series.reduce((a, b) => a + b, 0) / series.length
+  return series.map((v) => v - mean)
+}
+
+/**
+ * Standardizes a time series to zero mean and unit variance.
+ *
+ * @param {Array&lt;number>} series Input series.
+ * @return {Array&lt;number>} Standardized series.
+ */
+export function standardizeSeries (series) {
+  if (!Array.isArray(series) || series.length &lt; 2) {
+    throw new Error('series must have at least 2 points')
+  }
+  const mean = series.reduce((a, b) => a + b, 0) / series.length
+  const variance = series.reduce((sum, v) => sum + (v - mean) * (v - mean), 0) / series.length
+  if (variance === 0) throw new Error('series has zero variance')
+  const std = Math.sqrt(variance)
+  return series.map((v) => (v - mean) / std)
+}
+
+/**
+ * Full preprocessing pipeline: prices -> RV -> log-vol -> center.
+ *
+ * @param {Array&lt;number>} prices Price series.
+ * @param {Object} opts Options.
+ * @param {number} opts.interval Aggregation interval.
+ * @param {boolean} opts.center Whether to center the series.
+ * @return {Array&lt;number>} Preprocessed log-volatility series.
+ */
+export function preprocessPipeline (prices, opts = {}) {
+  const rv = computeRV(prices, opts.interval || 1)
+  const logVol = logTransform(rv)
+  if (opts.center) {
+    return centerSeries(logVol)
+  }
+  return logVol
+}
+
+/**
+ * Splits a series into train/test sets.
+ *
+ * @param {Array&lt;number>} series Input series.
+ * @param {number} trainRatio Proportion for training (default 0.8).
+ * @return {{train: Array&lt;number>, test: Array&lt;number>}} Split data.
+ */
+export function trainTestSplit (series, trainRatio = 0.8) {
+  if (!Array.isArray(series)) throw new Error('series must be an array')
+  if (trainRatio &lt;= 0 || trainRatio >= 1) throw new Error('trainRatio must be in (0, 1)')
+  const splitIdx = Math.floor(series.length * trainRatio)
+  return {
+    train: series.slice(0, splitIdx),
+    test: series.slice(splitIdx)
+  }
+}
+
+/**
+ * Creates overlapping windows from a series.
+ *
+ * @param {Array&lt;number>} series Input series.
+ * @param {number} windowSize Window length.
+ * @param {number} step Step size.
+ * @return {Array&lt;Array&lt;number>>} Array of windows.
+ */
+export function createWindows (series, windowSize, step = 1) {
+  if (!Array.isArray(series)) throw new Error('series must be an array')
+  if (windowSize &lt;= 0) throw new Error('windowSize must be positive')
+  if (step &lt;= 0) throw new Error('step must be positive')
+
+  const windows = []
+  for (let i = 0; i + windowSize &lt;= series.length; i += step) {
+    windows.push(series.slice(i, i + windowSize))
+  }
+  return windows
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

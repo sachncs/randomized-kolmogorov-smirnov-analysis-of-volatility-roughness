@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: stats.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: stats.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Statistical utilities for RK-SAVR.
+ * Google JS Style Guide compliant.
+ */
+
+import { random } from './prng.js'
+
+/**
+ * Computes the Kolmogorov-Smirnov distance between two samples.
+ * D = sup_x |F_n(x) - G_m(x)| where F_n and G_m are empirical CDFs.
+ * Uses the two-sample KS statistic computation.
+ * @param {Array&lt;number>|Float64Array} sample1
+ * @param {Array&lt;number>|Float64Array} sample2
+ * @param {boolean} isSorted Whether the samples are already sorted.
+ * @return {number}
+ */
+export function ksDistance (sample1, sample2, isSorted = false) {
+  if (!Array.isArray(sample1) &amp;&amp; !(sample1 instanceof Float64Array)) {
+    throw new Error('sample1 must be an array')
+  }
+  if (!Array.isArray(sample2) &amp;&amp; !(sample2 instanceof Float64Array)) {
+    throw new Error('sample2 must be an array')
+  }
+  if (sample1.length === 0 || sample2.length === 0) {
+    throw new Error('ksDistance requires non-empty arrays')
+  }
+  if (sample1.some((v) => !Number.isFinite(v)) || sample2.some((v) => !Number.isFinite(v))) {
+    throw new Error('ksDistance requires finite values')
+  }
+  const s1 = isSorted ? sample1 : sample1.slice().sort((a, b) => a - b)
+  const s2 = isSorted ? sample2 : sample2.slice().sort((a, b) => a - b)
+
+  const n1 = s1.length
+  const n2 = s2.length
+
+  let i = 0
+  let j = 0
+  let maxDist = 0
+
+  while (i &lt; n1 &amp;&amp; j &lt; n2) {
+    const v1 = s1[i]
+    const v2 = s2[j]
+
+    // Compute CDF values at current positions before advancing
+    // F_n(x) = (number of elements &lt;= x) / n
+    // When values are equal, both advance (tie case)
+    if (v1 &lt; v2) {
+      // s1[i] is strictly less than s2[j]
+      // F_n = (i+1)/n1, G_m = j/n2
+      const dist = Math.abs((i + 1) / n1 - j / n2)
+      if (dist > maxDist) maxDist = dist
+      i++
+    } else if (v1 > v2) {
+      // s2[j] is strictly less than s1[i]
+      // F_n = i/n1, G_m = (j+1)/n2
+      const dist = Math.abs(i / n1 - (j + 1) / n2)
+      if (dist > maxDist) maxDist = dist
+      j++
+    } else {
+      // Tie: both values equal
+      // F_n = (i+1)/n1, G_m = (j+1)/n2
+      const dist = Math.abs((i + 1) / n1 - (j + 1) / n2)
+      if (dist > maxDist) maxDist = dist
+      i++
+      j++
+    }
+  }
+
+  // Check remaining elements
+  while (i &lt; n1) {
+    const dist = Math.abs((i + 1) / n1 - j / n2)
+    if (dist > maxDist) maxDist = dist
+    i++
+  }
+
+  while (j &lt; n2) {
+    const dist = Math.abs(i / n1 - (j + 1) / n2)
+    if (dist > maxDist) maxDist = dist
+    j++
+  }
+
+  return maxDist
+}
+
+/**
+ * Computes KS distance between two pre-sorted samples after rescaling by positive factors.
+ * Avoids array allocation by applying factors during the pointer walk.
+ * Multiplication by a positive scalar preserves ordering, so no re-sorting is needed.
+ *
+ * @param {Array&lt;number>|Float64Array} sortedA Pre-sorted sample A.
+ * @param {Array&lt;number>|Float64Array} sortedB Pre-sorted sample B.
+ * @param {number} factorA Positive rescaling factor for A.
+ * @param {number} factorB Positive rescaling factor for B.
+ * @return {number} KS distance between rescaled samples.
+ */
+export function ksDistanceRescaled (sortedA, sortedB, factorA, factorB) {
+  if (!Array.isArray(sortedA) &amp;&amp; !(sortedA instanceof Float64Array)) {
+    throw new Error('sortedA must be an array')
+  }
+  if (!Array.isArray(sortedB) &amp;&amp; !(sortedB instanceof Float64Array)) {
+    throw new Error('sortedB must be an array')
+  }
+  if (sortedA.length === 0 || sortedB.length === 0) {
+    throw new Error('ksDistanceRescaled requires non-empty arrays')
+  }
+
+  const n1 = sortedA.length
+  const n2 = sortedB.length
+
+  let i = 0
+  let j = 0
+  let maxDist = 0
+
+  while (i &lt; n1 &amp;&amp; j &lt; n2) {
+    const va = sortedA[i] * factorA
+    const vb = sortedB[j] * factorB
+
+    if (va &lt; vb) {
+      const dist = Math.abs((i + 1) / n1 - j / n2)
+      if (dist > maxDist) maxDist = dist
+      i++
+    } else if (va > vb) {
+      const dist = Math.abs(i / n1 - (j + 1) / n2)
+      if (dist > maxDist) maxDist = dist
+      j++
+    } else {
+      const dist = Math.abs((i + 1) / n1 - (j + 1) / n2)
+      if (dist > maxDist) maxDist = dist
+      i++
+      j++
+    }
+  }
+
+  while (i &lt; n1) {
+    const dist = Math.abs((i + 1) / n1 - j / n2)
+    if (dist > maxDist) maxDist = dist
+    i++
+  }
+
+  while (j &lt; n2) {
+    const dist = Math.abs(i / n1 - (j + 1) / n2)
+    if (dist > maxDist) maxDist = dist
+    j++
+  }
+
+  return maxDist
+}
+
+/**
+ * Fisher-Yates shuffle.
+ * Fisher-Yates shuffle.
+ * @param {Array&lt;*>} array Input array.
+ * @return {Array&lt;*>} Shuffled array.
+ */
+export function shuffle (array) {
+  const arr = array.slice()
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1))
+    const tmp = arr[i]
+    arr[i] = arr[j]
+    arr[j] = tmp
+  }
+  return arr
+}
+
+/**
+ * Floyd's reservoir sampling for random sampling without replacement.
+ * More efficient than Set-based collision detection.
+ * @param {Array&lt;*>} array Input array.
+ * @param {number} n Number of elements to sample.
+ * @return {Array&lt;*>} Random sample.
+ */
+/**
+ * Block random permutation for decorrelating serial dependence.
+ * Partitions data into blocks of length blockSize, shuffles the blocks,
+ * and optionally applies a random phase offset to the starting index.
+ * Preserves marginal distributions while stripping away autocorrelation.
+ *
+ * @param {Array&lt;*>} data Input array.
+ * @param {number} blockSize Block length.
+ * @param {boolean} randomPhase Whether to apply a random starting phase.
+ * @return {Array&lt;*>} Permuted array.
+ */
+export function blockPermutation (data, blockSize, randomPhase = false) {
+  if (!Array.isArray(data) &amp;&amp; !(data instanceof Float64Array)) {
+    throw new Error('data must be an array')
+  }
+  if (blockSize &lt;= 0 || blockSize > data.length) {
+    throw new Error('blockSize must be positive and not exceed data length')
+  }
+
+  const n = data.length
+  let offset = 0
+  if (randomPhase) {
+    offset = Math.floor(random() * blockSize)
+  }
+
+  // Extract blocks starting from offset, including prefix as first block if offset > 0
+  const blocks = []
+  if (offset > 0) {
+    blocks.push(data.slice(0, offset))
+  }
+  for (let i = offset; i &lt; n; i += blockSize) {
+    blocks.push(data.slice(i, Math.min(i + blockSize, n)))
+  }
+
+  // Fisher-Yates shuffle on blocks
+  for (let i = blocks.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1))
+    const tmp = blocks[i]
+    blocks[i] = blocks[j]
+    blocks[j] = tmp
+  }
+
+  // Flatten
+  const result = []
+  for (const block of blocks) {
+    for (const item of block) {
+      result.push(item)
+    }
+  }
+
+  return result
+}
+
+/**
+ * Floyd's reservoir sampling for random sampling without replacement.
+ * More efficient than Set-based collision detection.
+ * @param {Array&lt;*>} array Input array.
+ * @param {number} n Number of elements to sample.
+ * @return {Array&lt;*>} Random sample.
+ */
+export function randomSample (array, n) {
+  const len = array.length
+  if (n >= len) return shuffle(array)
+  if (n &lt;= 0) return []
+
+  // Use Floyd's algorithm for reservoir sampling
+  const result = array.slice(0, n)
+
+  for (let i = n; i &lt; len; i++) {
+    const j = Math.floor(random() * (i + 1))
+    if (j &lt; n) {
+      result[j] = array[i]
+    }
+  }
+
+  return result
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

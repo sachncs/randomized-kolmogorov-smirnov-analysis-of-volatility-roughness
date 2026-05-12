@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: rksavr.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: rksavr.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * RK-SAVR Modular Core.
+ * Implements Randomized Kolmogorov-Smirnov Analysis of Volatility Roughness.
+ * Google JS Style Guide compliant.
+ */
+
+import { ksDistanceRescaled, randomSample, blockPermutation } from './stats.js'
+import { getOptimizerFactory, registerOptimizerFactory } from './optimization.js'
+import { warn, error } from './logger.js'
+
+/**
+ * Default Sampler: Random selection.
+ */
+const defaultSampler = (data, n) => randomSample(data, n)
+
+/**
+ * Vectorized KS objective for multi-scale analysis.
+ * Pre-sorted samples, rescale only.
+ * @param {Array&lt;Float64Array>} sortedSamples Pre-sorted samples at different scales.
+ * @param {Array&lt;number>} scales Array of scale values.
+ * @param {number} H Hurst parameter.
+ * @return {number} Mean KS distance across all scale pairs.
+ */
+const vectorizedKsObjective = (sortedSamples, scales, H) => {
+  const n = sortedSamples.length
+  let totalDist = 0
+  let count = 0
+
+  for (let i = 0; i &lt; n; i++) {
+    for (let j = i + 1; j &lt; n; j++) {
+      totalDist += computeScalePairDistance(sortedSamples, scales, i, j, H)
+      count++
+    }
+  }
+  return count > 0 ? totalDist / count : 0
+}
+
+/**
+ * Computes KS distance between a pair of rescaled samples.
+ * @param {Array&lt;Float64Array>} sortedSamples Pre-sorted samples.
+ * @param {Array&lt;number>} scales Scale values.
+ * @param {number} i First sample index.
+ * @param {number} j Second sample index.
+ * @param {number} H Hurst parameter.
+ * @return {number} KS distance between rescaled samples.
+ */
+const computeScalePairDistance = (sortedSamples, scales, i, j, H) => {
+  const factorI = Math.pow(scales[i], -H)
+  const factorJ = Math.pow(scales[j], -H)
+  return ksDistanceRescaled(sortedSamples[i], sortedSamples[j], factorI, factorJ)
+}
+
+/**
+ * Builds a flat profile array of all pairwise KS distances between
+ * rescaled samples at the given scales for a fixed H.
+ * @param {Array&lt;Float64Array>} sortedSamples Pre-sorted samples.
+ * @param {Array&lt;number>} scales Scale values.
+ * @param {number} H Hurst parameter.
+ * @return {Array&lt;number>} Flat profile array.
+ */
+function buildScaleProfile (sortedSamples, scales, H) {
+  const profile = []
+  for (let i = 0; i &lt; sortedSamples.length; i++) {
+    for (let j = i + 1; j &lt; sortedSamples.length; j++) {
+      profile.push(computeScalePairDistance(sortedSamples, scales, i, j, H))
+    }
+  }
+  return profile
+}
+
+/**
+ * Weighted KS objective with scale weights.
+ * @param {Array&lt;Float64Array>} sortedSamples Pre-sorted samples.
+ * @param {Array&lt;number>} scales Scale values.
+ * @param {Array&lt;number>} weights Scale weights.
+ * @param {number} H Hurst parameter.
+ * @return {number} Weighted KS distance.
+ */
+const weightedKsObjective = (sortedSamples, scales, weights, H) => {
+  const n = sortedSamples.length
+  let totalDist = 0
+  let weightSum = 0
+
+  for (let i = 0; i &lt; n; i++) {
+    for (let j = i + 1; j &lt; n; j++) {
+      const dist = computeScalePairDistance(sortedSamples, scales, i, j, H)
+      totalDist += weights[i] * weights[j] * dist
+      weightSum += weights[i] * weights[j]
+    }
+  }
+
+  return weightSum > 0 ? totalDist / weightSum : 0
+}
+
+/**
+ * RK-SAVR Estimator class.
+ * Estimates Hurst parameter (H) for rough volatility models.
+ * H must satisfy 0 &lt; H &lt; 1.
+ */
+export class RKSAVR {
+  /**
+   * @param {Object} config Configuration options.
+   * @param {number} config.scaleA1 Lower scale (default 1).
+   * @param {number} config.scaleA2 Upper scale (default 50).
+   * @param {Array&lt;number>=} config.scales Array of scale values for multi-scale analysis.
+   * @param {number} config.sampleSize Sample size per scale (default 500).
+   * @param {number} config.iterations Number of variance-reduction iterations (default 16).
+   * @param {function=} config.sampler Custom sampler function.
+   * @param {Array&lt;number>=} config.weights Scale weights for weighted estimation.
+   * @param {string} config.optimizerType Optimizer: 'brent', 'nelder-mead', 'annealing', 'de', 'ags' (default 'brent').
+   * @param {number=} config.blockSize Block size for block random permutation (default null, uses point-wise sampling).
+   * @param {number=} config.hMin Lower bound for H estimate (default 0.01).
+   * @param {number=} config.hMax Upper bound for H estimate (default 0.99).
+   * The valid range for the estimated H is 0 &lt; H &lt; 1.
+   */
+  constructor (config = {}) {
+    this.scaleA1 = config.scaleA1 !== undefined ? config.scaleA1 : 1
+    this.scaleA2 = config.scaleA2 !== undefined ? config.scaleA2 : 50
+    this.scales = config.scales || null
+    this.sampleSize = config.sampleSize !== undefined ? config.sampleSize : 500
+    this.iterations = config.iterations !== undefined ? config.iterations : 16
+    this.sampler = config.sampler || defaultSampler
+    this.weights = config.weights || null
+    this.optimizerType = config.optimizerType || 'brent'
+    this.blockSize = config.blockSize || null
+    this.hMin = config.hMin !== undefined ? config.hMin : 0.01
+    this.hMax = config.hMax !== undefined ? config.hMax : 0.99
+
+    this._optimizer = this._initOptimizer()
+  }
+
+  /**
+   * Registers a custom optimizer in the global registry.
+   * @param {string} name Optimizer identifier.
+   * @param {function(): function} factory Returns the optimizer function.
+   */
+  static registerOptimizer (name, factory) {
+    registerOptimizerFactory(name, factory)
+  }
+
+  /**
+   * Initializes optimizer based on optimizerType.
+   * @private
+   * @return {function} Optimizer function.
+   */
+  _initOptimizer () {
+    const factory = getOptimizerFactory(this.optimizerType) ||
+        getOptimizerFactory('brent')
+    return factory()
+  }
+
+  /**
+   * Computes increments for a series at given scale.
+   * @param {Array&lt;number>|Float64Array} series Input series.
+   * @param {number} scale Scale value.
+   * @return {Float64Array} Increment array.
+   */
+  static getIncrements (series, scale) {
+    const len = series.length
+    const result = new Float64Array(len - scale)
+    for (let i = 0; i &lt; len - scale; i++) {
+      result[i] = series[i + scale] - series[i]
+    }
+    return result
+  }
+
+  /**
+   * Precomputes all increments for a set of scales in a single pass.
+   * @param {Array&lt;number>|Float64Array} series Input series.
+   * @param {Array&lt;number>} scales Array of scale values.
+   * @return {Map&lt;number, Float64Array>} Map from scale to increment array.
+   */
+  static getIncrementsMulti (series, scales) {
+    const result = new Map()
+    const len = series.length
+
+    for (const scale of scales) {
+      const inc = new Float64Array(len - scale)
+      for (let i = 0; i &lt; len - scale; i++) {
+        inc[i] = series[i + scale] - series[i]
+      }
+      result.set(scale, inc)
+    }
+
+    return result
+  }
+
+  /**
+   * Single estimation of H.
+   * @param {Array&lt;number>} window Data window.
+   * @param {Object} opts Override options.
+   * @return {number} Estimated H.
+   */
+  /**
+   * Internal estimation that returns both H and the prepared samples.
+   * @param {Array&lt;number>} window Data window.
+   * @param {Object} opts Override options.
+   * @return {{H: number, sortedSamples: Array&lt;Float64Array>, scaleValues: Array&lt;number>}}
+   * @private
+   */
+  _estimateSingleRaw (window, opts = {}) {
+    if (!window || window.length === 0) {
+      throw new Error('window must be a non-empty array')
+    }
+
+    const scales = opts.scales || this.scales
+    const sampleSize = opts.sampleSize || this.sampleSize
+    const sampler = opts.sampler || this.sampler
+    const weights = opts.weights || this.weights
+    const optimizer = this._optimizer
+    const blockSize = opts.blockSize !== undefined ? opts.blockSize : this.blockSize
+    const hMin = this.hMin
+    const hMax = this.hMax
+
+    let sortedSamples
+    let scaleValues
+
+    const makeSampler = (inc) => {
+      if (blockSize &amp;&amp; blockSize > 0) {
+        const perm = blockPermutation(inc, blockSize, true)
+        return randomSample(perm, sampleSize)
+      }
+      return sampler(inc, sampleSize)
+    }
+
+    if (scales &amp;&amp; scales.length > 0) {
+      scaleValues = scales
+      const incMap = RKSAVR.getIncrementsMulti(window, scales)
+      sortedSamples = scales.map((scale) => {
+        const inc = incMap.get(scale)
+        return makeSampler(inc).sort((a, b) => a - b)
+      })
+    } else {
+      scaleValues = [this.scaleA1, this.scaleA2]
+      const inc1 = RKSAVR.getIncrements(window, this.scaleA1)
+      const inc2 = RKSAVR.getIncrements(window, this.scaleA2)
+      sortedSamples = [
+        makeSampler(inc1).sort((a, b) => a - b),
+        makeSampler(inc2).sort((a, b) => a - b)
+      ]
+    }
+
+    let fn
+    if (scaleValues.length > 2 &amp;&amp; weights) {
+      fn = (H) => weightedKsObjective(sortedSamples, scaleValues, weights, H)
+    } else if (scaleValues.length > 2) {
+      fn = (H) => vectorizedKsObjective(sortedSamples, scaleValues, H)
+    } else {
+      fn = (H) => computeScalePairDistance(sortedSamples, scaleValues, 0, 1, H)
+    }
+
+    let rawH
+    try {
+      rawH = optimizer(fn, hMin, hMax, [0.5])
+    } catch (err) {
+      throw new Error(`Optimizer convergence failed: ${err.message}`)
+    }
+    if (!Number.isFinite(rawH)) {
+      throw new Error('Optimizer returned non-finite value')
+    }
+    const H = Math.max(hMin, Math.min(hMax, rawH))
+    const minimizedD = fn(H)
+    return { H, minimizedD, sortedSamples, scaleValues }
+  }
+
+  estimateSingle (window, opts = {}) {
+    return this._estimateSingleRaw(window, opts).H
+  }
+
+  /**
+   * Single estimation of H with diagnostics.
+   * @param {Array&lt;number>} window Data window.
+   * @param {Object} opts Override options.
+   * @return {{H: number, minimizedD: number}} Estimated H and minimized KS distance.
+   */
+  estimateSingleWithDiagnostics (window, opts = {}) {
+    const { H, minimizedD } = this._estimateSingleRaw(window, opts)
+    return { H, minimizedD }
+  }
+
+  /**
+   * Estimate H with variance reduction.
+   * @param {Array&lt;number>} window Data window.
+   * @param {Object} opts Options.
+   * @return {number} Averaged H estimate.
+   */
+  estimate (window, opts = {}) {
+    let sum = 0
+    let valid = 0
+    const k = (opts &amp;&amp; opts.iterations) || this.iterations
+    if (k &lt;= 0) throw new Error('iterations must be > 0')
+    for (let i = 0; i &lt; k; i++) {
+      try {
+        sum += this.estimateSingle(window, opts)
+        valid++
+      } catch (err) {
+        warn('estimate iteration failed', err.message)
+      }
+    }
+    if (valid === 0) {
+      throw new Error('All optimization iterations failed')
+    }
+    return sum / valid
+  }
+
+  /**
+   * Rolling estimation with progress callback.
+   * @param {Array&lt;number>} series Time series data.
+   * @param {number} windowSize Window size.
+   * @param {number} step Step size.
+   * @param {function(number): void=} onProgress Progress callback.
+   * @return {Array&lt;{t: number, H: number}>} Rolling estimates.
+   */
+  rolling (series, windowSize, step = 1, onProgress) {
+    if (series.length &lt; windowSize) return []
+    if (step &lt;= 0) throw new Error('step must be > 0')
+    const results = []
+    const total = Math.floor((series.length - windowSize) / step) + 1
+    let count = 0
+
+    for (let t = 0; t &lt;= series.length - windowSize; t += step) {
+      const window = series.slice(t, t + windowSize)
+      try {
+        const H = this.estimate(window)
+        results.push({ t, H })
+      } catch (err) {
+        warn(`Rolling window at t=${t} failed`, err.message)
+        results.push({ t, H: null, error: err.message })
+      }
+
+      count++
+      if (onProgress) onProgress(count / total)
+    }
+    return results
+  }
+
+  /**
+   * Multi-scale rolling estimation.
+   * @param {Array&lt;number>} series Time series data.
+   * @param {number} windowSize Window size.
+   * @param {Array&lt;number>} scales Array of scales.
+   * @param {Array&lt;number>} weights Optional weights for each scale.
+   * @param {number} step Step size.
+   * @param {function(number): void=} onProgress Progress callback.
+   * @return {Array&lt;{t: number, H: number, profile: Array&lt;number>}>} Rolling estimates.
+   */
+  rollingMultiScale (series, windowSize, scales, weights = null, step = 1, onProgress) {
+    if (series.length &lt; windowSize) return []
+    if (step &lt;= 0) throw new Error('step must be > 0')
+    const results = []
+    const total = Math.floor((series.length - windowSize) / step) + 1
+    let count = 0
+
+    const multiConfig = { scales, weights }
+
+    for (let t = 0; t &lt;= series.length - windowSize; t += step) {
+      const window = series.slice(t, t + windowSize)
+      try {
+        const { H, sortedSamples } = this._estimateSingleRaw(window, multiConfig)
+        const profile = buildScaleProfile(sortedSamples, scales, H)
+        results.push({ t, H, profile })
+      } catch (err) {
+        warn(`Multi-scale rolling window at t=${t} failed`, err.message)
+        results.push({ t, H: null, profile: [], error: err.message })
+      }
+      count++
+      if (onProgress) onProgress(count / total)
+    }
+    return results
+  }
+
+  /**
+   * Batch estimation for parallel processing.
+   * @param {Array&lt;Array&lt;number>>} windows Array of windows.
+   * @return {Array&lt;number>} Array of H estimates.
+   */
+  estimateBatch (windows) {
+    return windows.map((window, idx) => {
+      try {
+        const H = this.estimateSingle(window)
+        return { H, error: null }
+      } catch (err) {
+        error(`Batch window ${idx} failed`, err.message)
+        return { H: null, error: err.message }
+      }
+    })
+  }
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

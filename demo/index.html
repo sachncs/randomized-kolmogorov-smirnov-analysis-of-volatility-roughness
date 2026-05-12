@@ -1,115 +1,209 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RK-SAVR | Advanced Volatility Analytics</title>
-    <link rel="stylesheet" href="style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
-</head>
-<body class="theme-dark">
-    <div class="background-blobs">
-        <div class="blob blob-1"></div>
-        <div class="blob blob-2"></div>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RK-SAVR Observatory</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist+Mono:wght@300;400;600&family=Inter:wght@300;400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <nav class="sidebar" aria-label="Primary navigation">
+        <header class="brand">
+          <div class="brand-mark">
+            <svg
+              viewBox="0 0 40 40"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <circle
+                cx="20"
+                cy="20"
+                r="18"
+                stroke="currentColor"
+                stroke-width="1.5"
+              />
+              <path
+                d="M10 20 Q15 12 20 20 Q25 28 30 20"
+                stroke="currentColor"
+                stroke-width="1.5"
+                fill="none"
+              />
+              <circle cx="20" cy="20" r="3" fill="currentColor" />
+            </svg>
+          </div>
+          <div class="brand-text">
+            <h1>RK-SAVR</h1>
+            <span class="brand-sub">Observatory</span>
+          </div>
+        </header>
+
+        <ul class="nav-links" role="tablist">
+          <li>
+            <button
+              class="nav-link is-active"
+              data-view="dashboard"
+              role="tab"
+              aria-selected="true"
+              aria-controls="view-dashboard"
+            >
+              <span class="nav-icon" aria-hidden="true">
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                >
+                  <rect x="3" y="3" width="7" height="7" rx="1" />
+                  <rect x="14" y="3" width="7" height="7" rx="1" />
+                  <rect x="3" y="14" width="7" height="7" rx="1" />
+                  <rect x="14" y="14" width="7" height="7" rx="1" />
+                </svg>
+              </span>
+              <span class="nav-label">Dashboard</span>
+            </button>
+          </li>
+          <li>
+            <button
+              class="nav-link"
+              data-view="explorer"
+              role="tab"
+              aria-selected="false"
+              aria-controls="view-explorer"
+            >
+              <span class="nav-icon" aria-hidden="true">
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                >
+                  <circle cx="11" cy="11" r="8" />
+                  <path d="M21 21l-4.35-4.35" />
+                </svg>
+              </span>
+              <span class="nav-label">Explorer</span>
+            </button>
+          </li>
+          <li>
+            <button
+              class="nav-link"
+              data-view="figures"
+              role="tab"
+              aria-selected="false"
+              aria-controls="view-figures"
+            >
+              <span class="nav-icon" aria-hidden="true">
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                >
+                  <path d="M3 3v18h18" />
+                  <path d="M18 17V9" />
+                  <path d="M13 17V5" />
+                  <path d="M8 17v-4" />
+                </svg>
+              </span>
+              <span class="nav-label">Figures</span>
+            </button>
+          </li>
+        </ul>
+
+        <footer class="sidebar-footer">
+          <div class="status-indicator">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="status-text">System Ready</span>
+          </div>
+          <a
+            href="https://github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness"
+            target="_blank"
+            rel="noopener"
+            class="sidebar-link"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 00-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0020 4.77 5.07 5.07 0 0019.91 1S18.73.65 16 2.48a13.38 13.38 0 00-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 005 4.77a5.44 5.44 0 00-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 009 18.13V22"
+              />
+            </svg>
+            GitHub
+          </a>
+        </footer>
+      </nav>
+
+      <main class="content">
+        <div
+          class="view is-active"
+          id="view-dashboard"
+          role="tabpanel"
+          aria-labelledby="nav-dashboard"
+        >
+          <header class="page-header">
+            <h2 class="page-title">Real-Time Estimation</h2>
+            <p class="page-desc">
+              Live Hurst parameter estimation with animated trajectory and
+              diagnostic readouts.
+            </p>
+          </header>
+          <div id="dashboard-root"></div>
+        </div>
+
+        <div
+          class="view"
+          id="view-explorer"
+          role="tabpanel"
+          aria-labelledby="nav-explorer"
+          hidden
+        >
+          <header class="page-header">
+            <h2 class="page-title">Parameter Explorer</h2>
+            <p class="page-desc">
+              Grid search across Hurst values, window sizes, and optimizers with
+              comparative visualization.
+            </p>
+          </header>
+          <div id="explorer-root"></div>
+        </div>
+
+        <div
+          class="view"
+          id="view-figures"
+          role="tabpanel"
+          aria-labelledby="nav-figures"
+          hidden
+        >
+          <header class="page-header">
+            <h2 class="page-title">Paper Figures</h2>
+            <p class="page-desc">
+              Replicated figures from Angelini &amp; Bianchi with configurable
+              parameters and export.
+            </p>
+          </header>
+          <div id="figures-root"></div>
+        </div>
+      </main>
     </div>
 
-    <div class="app-wrapper">
-        <aside class="sidebar glass">
-            <div class="brand">
-                <div class="logo">Σ</div>
-                <h2>RK-SAVR</h2>
-            </div>
-            
-            <nav class="config-panel">
-                <div class="section-title">Data Simulation</div>
-                <div class="input-group">
-                    <label>True Hurst ($H_0$)</label>
-                    <div class="range-with-value">
-                        <input type="range" id="hurstInput" min="0.01" max="0.99" step="0.01" value="0.10">
-                        <span class="value-tag" id="hurstValue">0.10</span>
-                    </div>
-                </div>
-                <div class="input-group">
-                    <label>Path Length</label>
-                    <input type="number" id="lengthInput" value="2048" class="neon-input">
-                </div>
-
-                <div class="divider"></div>
-
-                <div class="section-title">Estimation Logic</div>
-                <div class="input-group">
-                    <label>Window Size ($\nu$)</label>
-                    <input type="number" id="windowInput" value="512" class="neon-input">
-                </div>
-                <div class="input-group">
-                    <label>Sample Size ($T$)</label>
-                    <input type="number" id="sampleInput" value="500" class="neon-input">
-                </div>
-                <div class="input-group">
-                    <label>Iterations ($K$)</label>
-                    <input type="number" id="iterInput" value="16" class="neon-input">
-                </div>
-
-                <button id="runBtn" class="primary-action">
-                    <span class="btn-text">Run Analysis</span>
-                    <div class="btn-glow"></div>
-                </button>
-            </nav>
-
-            <div class="progress-container hidden" id="progressBox">
-                <div class="progress-label">Processing Windows...</div>
-                <div class="progress-bar-bg">
-                    <div class="progress-bar-fill" id="progressBar"></div>
-                </div>
-            </div>
-        </aside>
-
-        <main class="content">
-            <header class="top-nav glass">
-                <div class="status-indicators">
-                    <div class="indicator">
-                        <span class="dot" id="statusDot"></span>
-                        <span id="statusText">System Idle</span>
-                    </div>
-                </div>
-                <div class="metric-cards">
-                    <div class="metric">
-                        <span class="m-label">Avg Estimate</span>
-                        <span class="m-value" id="avgHDisplay">--</span>
-                    </div>
-                    <div class="metric">
-                        <span class="m-label">Mean Error</span>
-                        <span class="m-value" id="errorHDisplay">--</span>
-                    </div>
-                </div>
-            </header>
-
-            <div class="dashboard-grid">
-                <div class="card glass chart-card full-width">
-                    <div class="card-header">
-                        <h3>Volatility Trajectory (fBm Path)</h3>
-                        <div class="card-actions">
-                            <span class="badge">Live Generation</span>
-                        </div>
-                    </div>
-                    <div id="seriesChart" class="chart-box"></div>
-                </div>
-
-                <div class="card glass chart-card full-width">
-                    <div class="card-header">
-                        <h3>Roughness Estimation Profile</h3>
-                        <div class="card-actions">
-                            <span class="badge accent">RK-SAVR Pipeline</span>
-                        </div>
-                    </div>
-                    <div id="resultsChart" class="chart-box"></div>
-                </div>
-            </div>
-        </main>
-    </div>
-
-    <script type="module" src="main.js"></script>
-</body>
+    <script type="module" src="app.js"></script>
+  </body>
 </html>
