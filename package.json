@@ -90,7 +90,7 @@
     "mocha": "^10.2.0",
     "plotly.js-dist-min": "^2.35.0",
     "prettier": "^3.8.3",
-    "rollup": "^4.0.2",
+    "rollup": "^4.60.4",
     "vite": "^5.0.0"
   }
 }
