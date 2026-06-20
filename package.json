@@ -11,6 +11,11 @@
       "require": "./dist/index.cjs"
     }
   },
+  "homepage": "https://github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness#readme",
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/sachn-cs"
+  },
   "scripts": {
     "dev": "vite demo",
     "build:demo": "vite build demo",
