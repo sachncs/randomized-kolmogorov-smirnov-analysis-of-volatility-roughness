@@ -11,9 +11,9 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'npm'
@@ -21,59 +21,76 @@ jobs:
       - run: npm ci
 
       - name: Run ESLint
-        run: npx eslint lib/ --ext .js
+        run: npm run lint
 
   test:
-    name: Test
+    name: Test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    needs: [lint]
+    strategy:
+      matrix:
+        node: [18, 20, 22]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
           cache: 'npm'
 
       - run: npm ci
 
-      - name: Verify modules
-        run: |
-          node --check lib/stats.js
-          node --check lib/inference.js
-          node --check lib/inference/math.js
-          node --check lib/inference/asymptotic.js
-          node --check lib/inference/filtering.js
-          node --check lib/rksavr.js
-          node --check lib/models/rbergomi.js
-          node --check lib/models/rfsv.js
-          node --check lib/models/fou.js
-          node --check lib/models/mpre.js
-          node --check lib/models/forecasting.js
-          node --check lib/models/index.js
-
-      - run: npm test
+      - name: Run tests with coverage
+        run: npm run test:coverage
 
   build:
     name: Build
     runs-on: ubuntu-latest
+    needs: [test]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'npm'
 
       - run: npm ci
 
-      - run: npm run build
+      - name: Build distribution bundles
+        run: npm run build
         env:
           CI: true
 
       - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         with:
           name: dist
           path: dist/
+          retention-days: 7
+
+  docs:
+    name: Build Documentation
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Generate documentation
+        run: npm run docs
+
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: docs
+          path: docs/
           retention-days: 7
