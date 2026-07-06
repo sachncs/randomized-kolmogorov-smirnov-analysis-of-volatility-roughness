@@ -1,34 +1,86 @@
-<!-- ---------------------------------------------------------------------------
-
-🎉 THANK YOU FOR YOUR CONTRIBUTION! 🎉
-
-We highly appreciate your time and effort to this project!
-
-⚠ PLEASE READ THIS FIRST ⚠
-
-1. If this is a fix for a security vulnerability you discovered please don't
-just open this PR until we have privately discussed the vulnerability. Disclosing
-it without contacting us can lead to severe implications for many applications
-that run on this project.
-
-2. Make sure you have read the contribution guidelines for this project in
-order to raise the chance of getting your PR accepted. This saves you valuable
-time and effort.
-
-3. The following structure is a basic guideline. If a section does not apply you
-can remove it.
----------------------------------------------------------------------------- -->
-
 ## Summary
 
+<!-- Provide a brief summary of the changes in this PR. -->
 
-## Linked issue(s)
+## Related Issue
 
+<!-- Link to the issue this PR addresses. Use "Fixes #123" or "Closes #123" to auto-close. -->
 
-## Involved parts of the project
+## Changes
 
+<!-- List the main changes made in this PR. -->
 
-## Added tests?
+- 
+- 
+- 
 
+## Type of Change
 
-## Reproduction
+<!-- Check the relevant option(s). -->
+
+- [ ] Bug fix (non-breaking change that fixes an issue)
+- [ ] New feature (non-breaking change that adds functionality)
+- [ ] Breaking change (fix or feature that would cause existing functionality to change)
+- [ ] Documentation update
+- [ ] Refactoring (no functional changes)
+- [ ] Test update
+- [ ] CI/CD or build configuration change
+
+## Paper Fidelity
+
+<!-- If this change affects algorithm behavior, describe its relationship to the RK-SAVR paper (arXiv:2509.20015v3). -->
+
+- [ ] Not applicable
+- [ ] Improves fidelity to the paper
+- [ ] Adds an extension beyond the paper
+- [ ] Changes algorithm behavior (describe below)
+
+## Testing
+
+<!-- Describe how you tested these changes. Include relevant test commands. -->
+
+```bash
+npm test
+npm run lint
+```
+
+- [ ] All existing tests pass
+- [ ] New tests added (if applicable)
+- [ ] Tested with synthetic data
+- [ ] Tested with real data (if applicable)
+
+## Documentation
+
+<!-- Check if documentation was updated. -->
+
+- [ ] JSDoc comments updated
+- [ ] README updated (if applicable)
+- [ ] CHANGELOG entry added (if applicable)
+- [ ] API.md regenerated (if applicable)
+
+## Performance
+
+<!-- If applicable, note any performance implications. -->
+
+- [ ] No performance impact
+- [ ] Performance improvement (include benchmarks if possible)
+- [ ] Performance regression (explain why necessary)
+
+## Checklist
+
+- [ ] My code follows the project's coding standards
+- [ ] I have performed a self-review of my code
+- [ ] I have commented my code where necessary
+- [ ] I have updated documentation accordingly
+- [ ] My changes generate no new warnings
+- [ ] I have added tests that prove my fix is effective or my feature works
+- [ ] New and existing tests pass locally with my changes
+- [ ] Any dependent changes have been merged and published
+
+## Screenshots / Plots
+
+<!-- If applicable, add screenshots or plots to help reviewers understand the changes. -->
+
+## Additional Notes
+
+<!-- Add any other context or information that reviewers should know. -->
