@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>JSDoc: Source: models/fou.js</title>
+    <title>JSDoc: Source: optimization/brent.js</title>
 
     <script src="scripts/prettify/prettify.js"> </script>
     <script src="scripts/prettify/lang-css.js"> </script>
@@ -17,7 +17,7 @@
 
 <div id="main">
 
-    <h1 class="page-title">Source: models/fou.js</h1>
+    <h1 class="page-title">Source: optimization/brent.js</h1>
 
     
 
@@ -27,175 +27,136 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * @fileoverview Fractional Ornstein-Uhlenbeck (fOU) simulator.
+ * @fileoverview Brent's method for 1D function minimization.
  *
- * Mean-reverting process driven by fractional Brownian motion:
+ * Brent's method combines parabolic interpolation with the robust
+ * golden-section search. It superlinearly converges when the objective is
+ * smooth around the minimum and gracefully falls back to golden-section
+ * when it is not. Reference: Brent (1971), *Algorithms for Minimization
+ * without Derivatives*.
  *
- *     dX_t = theta * (mu - X_t) dt + sigma * dB^H_t
- *
- * where `B^H` is fractional Brownian motion with Hurst parameter `H`.
- *
- * - For `H = 0.5` the driver reduces to ordinary Brownian motion and
- *   the simulator switches to an exact discretization (the Vasicek
- *   recursion).
- * - For `H != 0.5` we fall back to Euler-Maruyama using a pre-generated
- *   fGN sample; this introduces `O(sqrt(dt))` bias but is adequate for
- *   path generation at the typical sample sizes used here.
- *
- * The `exactOU` companion uses a fully consistent fractional integral
- * discretization that is more accurate but `O(n^2)` per path.
+ * The implementation enforces the standard guard conditions from
+ * Numerical Recipes (parabolic step is rejected when it would step out of
+ * bounds or when it would move further than half the previous parabolic
+ * step). This keeps the method numerically stable for the KS objective
+ * which is only piecewise smooth.
  */
-
-import {generateFGN, randn} from '../random.js';
 
 /**
- * Simulates an fOU path using Euler-Maruyama (or exact Vasicek when
- * `H = 0.5`).
+ * Minimizes `f(x)` on the interval `[ax, cx]` using Brent's method.
  *
- * The exact Vasicek recursion for `H = 0.5` is
+ * The algorithm tracks the best point `x`, the second-best `w`, and the
+ * third-best `v`; it uses a parabolic fit whenever the parabolic step is
+ * safe, otherwise falls back to a golden-section step. Convergence is
+ * declared when `|x - midpoint| &lt;= 2 * tol * |x| + EPS` or when the
+ * iteration cap of 100 is reached.
  *
- *     X_{t+1} = mu + (X_t - mu) * exp(-theta * dt)
- *                      + sigma * sqrt((1 - exp(-2 theta dt)) / (2 theta))
- *                        * Z_{t+1}
+ * Invariants:
  *
- * which avoids the bias introduced by naive EM for the standard OU
- * process.
+ * - The bracket `[a, b]` always contains the minimum.
+ * - `f(x) &lt;= f(w) &lt;= f(v)` at every iteration.
  *
- * @param {Object} params Model parameters.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
+ * @param {function(number): number} f The function to minimize.
+ * @param {number} ax Lower bound of the search interval.
+ * @param {number} bx Initial guess within `[ax, cx]`.
+ * @param {number} cx Upper bound of the search interval.
+ * @param {number} tol Convergence tolerance (default `1e-6`).
+ * @return {{x: number, f: number}} The argmin `x` and the value `f(x)`.
+ * @throws {Error} When the bounds are equal or do not bracket `bx`.
  */
-export function fOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
-
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
+export function brentMinimize(f, ax, bx, cx, tol = 1e-6) {
+  if (!Number.isFinite(ax) || !Number.isFinite(bx) || !Number.isFinite(cx)) {
+    throw new Error('Bounds must be finite numbers');
+  }
+  let a = Math.min(ax, cx);
+  let b = Math.max(ax, cx);
+  if (a >= b) {
+    throw new Error('Lower bound must be strictly less than upper bound');
+  }
+  if (bx &lt; a || bx > b) {
+    throw new Error('Initial guess must lie within bounds');
   }
 
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
+  const GOLDEN = 0.381966;
+  const EPS = 1e-10;
 
-  if (H === 0.5) {
-    // Exact discretization for standard OU
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
+  let x = bx || (a + b) / 2;
+  let w = x;
+  let v = x;
 
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
-    }
-  } else {
-    // Euler-Maruyama for fractional OU
-    // Generate fractional Gaussian noise
-    const fGn = generateFGN(nSteps, H);
-    const sqrtDt = Math.sqrt(dt);
+  let fx = f(x);
+  let fw = fx;
+  let fv = fx;
 
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-      const diffusion = sigma * fGn[t - 1] * sqrtDt;
-      path[t] = path[t - 1] + drift + diffusion;
-    }
-  }
+  let d = 0;
+  let e = 0;
 
-  return {path, times};
-}
+  for (let iter = 0; iter &lt; 100; iter++) {
+    const xm = 0.5 * (a + b);
+    const tol1 = tol * Math.abs(x) + EPS;
+    const tol2 = 2.0 * tol1;
 
-/**
- * "Exact" Riemann-Liouville fractional-integral fOU simulator.
- *
- * Replaces the Euler-Maruyama diffusion of {@link fOU} with an exact
- * Riemann-Liouville integral of the Brownian increments against a
- * precomputed kernel
- *
- *     K(i) = sqrt(2H) * (i * dt)^{H - 0.5}
- *
- * Path update becomes
- *
- *     X_{t+1} = X_t + theta * (mu - X_t) * dt + sigma * sqrt(dt) * I_{t+1}
- *     I_{t+1} = sum_{j &lt;= t} K(t - j) * dW_j
- *
- * The integral is `O(t)` per step and the entire path is `O(n^2)` in
- * `nSteps`, so this is reserved for short series or experiments that
- * need to isolate discretization error.
- *
- * @param {Object} params Same shape as {@link fOU}.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
- */
-export function exactOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
-
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
-  }
-
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
-
-  if (H === 0.5) {
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
-    }
-  } else {
-    // Precompute kernel for fractional integral
-    const kernel = new Float64Array(nSteps);
-    const coeff = Math.sqrt(2 * H);
-    for (let i = 0; i &lt; nSteps; i++) {
-      const t = (i + 1) * dt;
-      kernel[i] = coeff * Math.pow(t, H - 0.5);
+    if (Math.abs(x - xm) &lt;= tol2 - 0.5 * (b - a)) {
+      return {x, f: fx};
     }
 
-    // Generate fBM increments
-    const fGn = generateFGN(nSteps, H);
+    if (Math.abs(e) > tol1) {
+      const r = (x - w) * (fx - fv);
+      let q = (x - v) * (fx - fw);
+      let p = (x - v) * q - (x - w) * r;
+      q = 2.0 * (q - r);
+      if (q > 0.0) p = -p;
+      q = Math.abs(q);
+      const etemp = e;
+      e = d;
 
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-
-      // Fractional integral: sum_{j=0}^{t-1} K(t-j) * dW_j
-      let fracInt = 0;
-      for (let j = 0; j &lt; t; j++) {
-        fracInt += kernel[t - 1 - j] * fGn[j];
+      if (
+        Math.abs(p) >= Math.abs(0.5 * q * etemp) ||
+        p &lt;= q * (a - x) ||
+        p >= q * (b - x)
+      ) {
+        e = x >= xm ? a - x : b - x;
+        d = GOLDEN * e;
+      } else {
+        d = p / q;
+        const u = x + d;
+        if (u - a &lt; tol2 || b - u &lt; tol2) {
+          d = xm - x >= 0 ? tol1 : -tol1;
+        }
       }
-      fracInt *= Math.sqrt(dt);
+    } else {
+      e = x >= xm ? a - x : b - x;
+      d = GOLDEN * e;
+    }
 
-      path[t] = path[t - 1] + drift + sigma * fracInt;
+    const u = Math.abs(d) >= tol1 ? x + d : x + (d >= 0 ? tol1 : -tol1);
+    const fu = f(u);
+
+    if (fu &lt;= fx) {
+      if (u >= x) a = x;
+      else b = x;
+      v = w;
+      fv = fw;
+      w = x;
+      fw = fx;
+      x = u;
+      fx = fu;
+    } else {
+      if (u &lt; x) a = u;
+      else b = u;
+      if (fu &lt;= fw || w === x) {
+        v = w;
+        fv = fw;
+        w = u;
+        fw = fu;
+      } else if (fu &lt;= fv || v === x || v === w) {
+        v = u;
+        fv = fu;
+      }
     }
   }
 
-  return {path, times};
+  return {x, f: fx};
 }
 </code></pre>
         </article>

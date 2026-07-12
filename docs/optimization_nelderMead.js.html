@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>JSDoc: Source: models/fou.js</title>
+    <title>JSDoc: Source: optimization/nelderMead.js</title>
 
     <script src="scripts/prettify/prettify.js"> </script>
     <script src="scripts/prettify/lang-css.js"> </script>
@@ -17,7 +17,7 @@
 
 <div id="main">
 
-    <h1 class="page-title">Source: models/fou.js</h1>
+    <h1 class="page-title">Source: optimization/nelderMead.js</h1>
 
     
 
@@ -27,175 +27,137 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * @fileoverview Fractional Ornstein-Uhlenbeck (fOU) simulator.
+ * @fileoverview Nelder-Mead simplex optimizer.
  *
- * Mean-reverting process driven by fractional Brownian motion:
+ * Nelder-Mead (1965) maintains a simplex of `n + 1` points in
+ * `n`-dimensional space and iteratively replaces the worst vertex with a
+ * reflection, expansion, contraction, or full-shrink step. The method is
+ * derivative-free, robust to non-smooth objectives, but only linearly
+ * convergent; for smooth problems prefer quasi-Newton methods.
  *
- *     dX_t = theta * (mu - X_t) dt + sigma * dB^H_t
+ * Coefficients:
  *
- * where `B^H` is fractional Brownian motion with Hurst parameter `H`.
- *
- * - For `H = 0.5` the driver reduces to ordinary Brownian motion and
- *   the simulator switches to an exact discretization (the Vasicek
- *   recursion).
- * - For `H != 0.5` we fall back to Euler-Maruyama using a pre-generated
- *   fGN sample; this introduces `O(sqrt(dt))` bias but is adequate for
- *   path generation at the typical sample sizes used here.
- *
- * The `exactOU` companion uses a fully consistent fractional integral
- * discretization that is more accurate but `O(n^2)` per path.
+ * - `alpha > 0`: reflection (default `1.0`)
+ * - `gamma > 1`: expansion (default `2.0`)
+ * - `0 &lt; rho &lt; 1`: contraction (default `0.5`)
+ * - `0 &lt; sigma &lt; 1`: shrink (default `0.5`)
  */
-
-import {generateFGN, randn} from '../random.js';
 
 /**
- * Simulates an fOU path using Euler-Maruyama (or exact Vasicek when
- * `H = 0.5`).
+ * Nelder-Mead minimization over a multidimensional space.
  *
- * The exact Vasicek recursion for `H = 0.5` is
+ * Builds an initial simplex by perturbing each axis of `x0` by `1e-4`
+ * and then iterates the standard reflection / expansion / contraction /
+ * shrink move until either the spread of function values is below `tol`
+ * or `maxIter` iterations have been performed.
  *
- *     X_{t+1} = mu + (X_t - mu) * exp(-theta * dt)
- *                      + sigma * sqrt((1 - exp(-2 theta dt)) / (2 theta))
- *                        * Z_{t+1}
- *
- * which avoids the bias introduced by naive EM for the standard OU
- * process.
- *
- * @param {Object} params Model parameters.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
+ * @param {function(Array&lt;number>): number} f Objective function.
+ * @param {Array&lt;number>} x0 Initial guess (length determines dimension).
+ * @param {Object} opts Algorithm options.
+ * @param {number=} opts.maxIter Maximum iterations (default `1000`).
+ * @param {number=} opts.tol Convergence tolerance on the spread of `f`
+ *   values across the simplex (default `1e-6`).
+ * @param {number=} opts.alpha Reflection coefficient (default `1.0`).
+ * @param {number=} opts.gamma Expansion coefficient (default `2.0`).
+ * @param {number=} opts.rho Contraction coefficient (default `0.5`).
+ * @param {number=} opts.sigma Shrink coefficient (default `0.5`).
+ * @return {{x: Array&lt;number>, f: number, iter: number}} Best point, its
+ *   function value, and the iteration count at termination.
  */
-export function fOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
+export function nelderMead(f, x0, opts = {}) {
+  const maxIter = opts.maxIter || 1000;
+  const tol = opts.tol || 1e-6;
+  const alpha = opts.alpha || 1.0;
+  const gamma = opts.gamma || 2.0;
+  const rho = opts.rho || 0.5;
+  const sigma = opts.sigma || 0.5;
 
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
-  }
+  const n = x0.length;
+  const simplex = [];
 
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
-
-  if (H === 0.5) {
-    // Exact discretization for standard OU
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
-    }
-  } else {
-    // Euler-Maruyama for fractional OU
-    // Generate fractional Gaussian noise
-    const fGn = generateFGN(nSteps, H);
-    const sqrtDt = Math.sqrt(dt);
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-      const diffusion = sigma * fGn[t - 1] * sqrtDt;
-      path[t] = path[t - 1] + drift + diffusion;
+  for (let i = 0; i &lt;= n; i++) {
+    if (i === 0) {
+      simplex.push([...x0]);
+    } else {
+      const point = [...x0];
+      point[i - 1] = x0[i - 1] + 1e-4;
+      simplex.push(point);
     }
   }
 
-  return {path, times};
-}
+  const fVals = simplex.map((pt) => f(pt));
 
-/**
- * "Exact" Riemann-Liouville fractional-integral fOU simulator.
- *
- * Replaces the Euler-Maruyama diffusion of {@link fOU} with an exact
- * Riemann-Liouville integral of the Brownian increments against a
- * precomputed kernel
- *
- *     K(i) = sqrt(2H) * (i * dt)^{H - 0.5}
- *
- * Path update becomes
- *
- *     X_{t+1} = X_t + theta * (mu - X_t) * dt + sigma * sqrt(dt) * I_{t+1}
- *     I_{t+1} = sum_{j &lt;= t} K(t - j) * dW_j
- *
- * The integral is `O(t)` per step and the entire path is `O(n^2)` in
- * `nSteps`, so this is reserved for short series or experiments that
- * need to isolate discretization error.
- *
- * @param {Object} params Same shape as {@link fOU}.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
- */
-export function exactOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
+  let bestPt = simplex[0];
+  let bestFVal = fVals[0];
 
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
-  }
+  for (let iter = 0; iter &lt; maxIter; iter++) {
+    const sorted = simplex
+      .map((pt, idx) => ({pt, fVal: fVals[idx]}))
+      .sort((a, b) => a.fVal - b.fVal);
 
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
+    const sortedPts = sorted.map((s) => s.pt);
+    const sortedF = sorted.map((s) => s.fVal);
 
-  if (H === 0.5) {
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
-    }
-  } else {
-    // Precompute kernel for fractional integral
-    const kernel = new Float64Array(nSteps);
-    const coeff = Math.sqrt(2 * H);
-    for (let i = 0; i &lt; nSteps; i++) {
-      const t = (i + 1) * dt;
-      kernel[i] = coeff * Math.pow(t, H - 0.5);
-    }
+    bestPt = sortedPts[0];
+    bestFVal = sortedF[0];
 
-    // Generate fBM increments
-    const fGn = generateFGN(nSteps, H);
+    const xo = sortedPts[n];
+    const fn = sortedF[n];
+    const secondWorst = sortedF[n - 1];
 
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-
-      // Fractional integral: sum_{j=0}^{t-1} K(t-j) * dW_j
-      let fracInt = 0;
-      for (let j = 0; j &lt; t; j++) {
-        fracInt += kernel[t - 1 - j] * fGn[j];
+    const centroid = [];
+    for (let i = 0; i &lt; n; i++) {
+      let sum = 0;
+      for (let j = 0; j &lt; n; j++) {
+        sum += sortedPts[j][i];
       }
-      fracInt *= Math.sqrt(dt);
+      centroid.push(sum / n);
+    }
 
-      path[t] = path[t - 1] + drift + sigma * fracInt;
+    const xr = centroid.map((c, i) => c + alpha * (c - xo[i]));
+    const fr = f(xr);
+
+    if (fr &lt; sortedF[0]) {
+      const xe = centroid.map((c, i) => c + gamma * (xr[i] - c));
+      const fe = f(xe);
+      if (fe &lt; fr) {
+        simplex[n] = xe;
+        fVals[n] = fe;
+      } else {
+        simplex[n] = xr;
+        fVals[n] = fr;
+      }
+    } else if (fr &lt; secondWorst) {
+      simplex[n] = xr;
+      fVals[n] = fr;
+    } else {
+      const xc = centroid.map((c, i) => xo[i] + rho * (c - xo[i]));
+      const fc = f(xc);
+      if (fc &lt; fn) {
+        simplex[n] = xc;
+        fVals[n] = fc;
+      } else {
+        const best = sortedPts[0];
+        for (let i = 0; i &lt;= n; i++) {
+          simplex[i] = simplex[i].map(
+            (val, j) => best[j] + sigma * (val - best[j]),
+          );
+          fVals[i] = f(simplex[i]);
+        }
+      }
+    }
+
+    let maxDiff = 0;
+    for (let i = 1; i &lt;= n; i++) {
+      const diff = Math.abs(fVals[i] - fVals[0]);
+      if (diff > maxDiff) maxDiff = diff;
+    }
+    if (maxDiff &lt; tol) {
+      return {x: bestPt, f: bestFVal, iter};
     }
   }
 
-  return {path, times};
+  return {x: bestPt, f: bestFVal, iter: maxIter};
 }
 </code></pre>
         </article>

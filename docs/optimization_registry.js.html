@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>JSDoc: Source: models/fou.js</title>
+    <title>JSDoc: Source: optimization/registry.js</title>
 
     <script src="scripts/prettify/prettify.js"> </script>
     <script src="scripts/prettify/lang-css.js"> </script>
@@ -17,7 +17,7 @@
 
 <div id="main">
 
-    <h1 class="page-title">Source: models/fou.js</h1>
+    <h1 class="page-title">Source: optimization/registry.js</h1>
 
     
 
@@ -27,175 +27,118 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * @fileoverview Fractional Ornstein-Uhlenbeck (fOU) simulator.
+ * @fileoverview Optimizer registry and "safe" wrapper for RK-SAVR.
  *
- * Mean-reverting process driven by fractional Brownian motion:
+ * Each algorithm in `optimization/` is tailored for general use. Here we
+ * adapt them to the **uniform signature** the RK-SAVR estimator expects:
  *
- *     dX_t = theta * (mu - X_t) dt + sigma * dB^H_t
+ *     optimizer(f, hMin, hMax, [h0]) -> number
  *
- * where `B^H` is fractional Brownian motion with Hurst parameter `H`.
+ * - Algorithms that natively accept a scalar argument (Brent, AGS) are
+ *   used directly.
+ * - Algorithms that want a vector (Nelder-Mead, SA, DE) are wrapped to
+ *   lift the scalar objective to a 1-D vector objective.
  *
- * - For `H = 0.5` the driver reduces to ordinary Brownian motion and
- *   the simulator switches to an exact discretization (the Vasicek
- *   recursion).
- * - For `H != 0.5` we fall back to Euler-Maruyama using a pre-generated
- *   fGN sample; this introduces `O(sqrt(dt))` bias but is adequate for
- *   path generation at the typical sample sizes used here.
- *
- * The `exactOU` companion uses a fully consistent fractional integral
- * discretization that is more accurate but `O(n^2)` per path.
+ * Every factory wraps its optimizer with {@link safeOptimizer}, which
+ * converts thrown errors (overflow, non-convergence, ...) into a `NaN`
+ * return value. The upper-level `RKSAVR.estimate` then either skips or
+ * averages those iterations gracefully.
  */
 
-import {generateFGN, randn} from '../random.js';
+import {brentMinimize} from './brent.js';
+import {nelderMead} from './nelderMead.js';
+import {simulatedAnnealing} from './simulatedAnnealing.js';
+import {differentialEvolution} from './differentialEvolution.js';
+import {adaptiveGridSearch} from './adaptiveGridSearch.js';
 
 /**
- * Simulates an fOU path using Euler-Maruyama (or exact Vasicek when
- * `H = 0.5`).
+ * Wraps an optimizer so that any thrown error becomes `NaN` instead of
+ * propagating. The intent is to keep `RKSAVR.estimate` resilient: a bad
+ * iteration should be logged and skipped, not abort the whole batch.
  *
- * The exact Vasicek recursion for `H = 0.5` is
- *
- *     X_{t+1} = mu + (X_t - mu) * exp(-theta * dt)
- *                      + sigma * sqrt((1 - exp(-2 theta dt)) / (2 theta))
- *                        * Z_{t+1}
- *
- * which avoids the bias introduced by naive EM for the standard OU
- * process.
- *
- * @param {Object} params Model parameters.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
+ * @param {function} opt Optimizer function with the standard RK-SAVR
+ *   signature `(f, hMin, hMax, [h0]) -> number`.
+ * @return {function} Wrapped optimizer that returns `NaN` on failure.
  */
-export function fOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
-
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
-  }
-
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
-
-  if (H === 0.5) {
-    // Exact discretization for standard OU
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
+export function safeOptimizer(opt) {
+  return function (...args) {
+    try {
+      return opt(...args);
+    } catch (err) {
+      return NaN;
     }
-  } else {
-    // Euler-Maruyama for fractional OU
-    // Generate fractional Gaussian noise
-    const fGn = generateFGN(nSteps, H);
-    const sqrtDt = Math.sqrt(dt);
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-      const diffusion = sigma * fGn[t - 1] * sqrtDt;
-      path[t] = path[t - 1] + drift + diffusion;
-    }
-  }
-
-  return {path, times};
+  };
 }
 
 /**
- * "Exact" Riemann-Liouville fractional-integral fOU simulator.
+ * Mapping from short identifiers (`'brent'`, `'de'`, etc.) to
+ * factories that return a configured optimizer function.
  *
- * Replaces the Euler-Maruyama diffusion of {@link fOU} with an exact
- * Riemann-Liouville integral of the Brownian increments against a
- * precomputed kernel
+ * Each entry wraps its optimizer with `safeOptimizer` so that user
+ * code never has to catch convergence errors. The factors chosen here
+ * are conservative defaults; tune via custom factories for
+ * application-specific performance.
  *
- *     K(i) = sqrt(2H) * (i * dt)^{H - 0.5}
- *
- * Path update becomes
- *
- *     X_{t+1} = X_t + theta * (mu - X_t) * dt + sigma * sqrt(dt) * I_{t+1}
- *     I_{t+1} = sum_{j &lt;= t} K(t - j) * dW_j
- *
- * The integral is `O(t)` per step and the entire path is `O(n^2)` in
- * `nSteps`, so this is reserved for short series or experiments that
- * need to isolate discretization error.
- *
- * @param {Object} params Same shape as {@link fOU}.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
+ * @private
+ * @const
  */
-export function exactOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
+const OPTIMIZER_REGISTRY = {
+  brent: () =>
+    safeOptimizer(
+      (fn, min, max, guess) =>
+        brentMinimize(fn, min, guess[0] || 0.5, max, 1e-5).x,
+    ),
+  'nelder-mead': () =>
+    safeOptimizer(
+      (fn) => nelderMead((x) => fn(x[0]), [0.5], {maxIter: 500}).x[0],
+    ),
+  annealing: () =>
+    safeOptimizer(
+      (fn) =>
+        simulatedAnnealing((x) => fn(x[0]), [0.5], {
+          maxIter: 2000,
+          coolingRate: 0.99,
+          stepSize: 0.1,
+        }).x[0],
+    ),
+  de: () =>
+    safeOptimizer(
+      (fn) =>
+        differentialEvolution((x) => fn(x[0]), [0.5], {
+          maxIter: 300,
+          popSize: 30,
+        }).x[0],
+    ),
+  ags: () =>
+    safeOptimizer((fn, min, max) => adaptiveGridSearch(fn, min, max).x),
+};
 
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
-  }
+/**
+ * Retrieves an optimizer factory by name.
+ *
+ * @param {string} name Optimizer identifier.
+ * @return {function|undefined} The factory, or `undefined` if the name is
+ *   unknown (in which case `RKSAVR` falls back to `'brent'`).
+ */
+export function getOptimizerFactory(name) {
+  return OPTIMIZER_REGISTRY[name];
+}
 
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
-
-  if (H === 0.5) {
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
-    }
-  } else {
-    // Precompute kernel for fractional integral
-    const kernel = new Float64Array(nSteps);
-    const coeff = Math.sqrt(2 * H);
-    for (let i = 0; i &lt; nSteps; i++) {
-      const t = (i + 1) * dt;
-      kernel[i] = coeff * Math.pow(t, H - 0.5);
-    }
-
-    // Generate fBM increments
-    const fGn = generateFGN(nSteps, H);
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-
-      // Fractional integral: sum_{j=0}^{t-1} K(t-j) * dW_j
-      let fracInt = 0;
-      for (let j = 0; j &lt; t; j++) {
-        fracInt += kernel[t - 1 - j] * fGn[j];
-      }
-      fracInt *= Math.sqrt(dt);
-
-      path[t] = path[t - 1] + drift + sigma * fracInt;
-    }
-  }
-
-  return {path, times};
+/**
+ * Registers (or overrides) a custom optimizer factory.
+ *
+ * Use this to plug a proprietary or experimental optimizer into the
+ * registry without modifying the library source. The factory must
+ * return a function with the standard RK-SAVR signature
+ * `(f, hMin, hMax, [h0]) => number`.
+ *
+ * @param {string} name Optimizer identifier (used in
+ *   `RKSAVR({optimizerType: name})`).
+ * @param {function(): function} factory Factory returning the optimizer
+ *   function.
+ */
+export function registerOptimizerFactory(name, factory) {
+  OPTIMIZER_REGISTRY[name] = factory;
 }
 </code></pre>
         </article>

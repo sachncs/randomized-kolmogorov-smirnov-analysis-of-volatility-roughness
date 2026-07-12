@@ -27,104 +27,143 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * Rough Fractional Stochastic Volatility (rFSV) model.
+ * @fileoverview Rough Fractional Stochastic Volatility (rFSV) simulator.
  *
- * Combines rough volatility with Heston-like dynamics.
- * The roughness comes from the fractional kernel in the volatility process.
+ * Combines a Heston-style drift/diffusion
  *
- * Model:
- *   dV_t = theta * (mu - V_t) dt + nu * V_t^alpha dW_t^V
- *   with roughness from fractional kernel K(t) = sqrt(2H) * t^{H-0.5}
+ *     dV_t = theta * (mu - V_t) dt + nu * V_t^alpha * dW^V_t
  *
- * Reference: Gatheral, Jaisson, Rosenbaum (2018)
- * "Volatility is Rough"
+ * with an additive roughness term driven by the fractional kernel
+ * `K(t) = sqrt(2H) * t^{H - 0.5}`. The mean-reversion (`theta`) targets
+ * the long-run variance `mu` and the diffusion exponent `alpha = 0.5`
+ * recovers the classical square-root process.
  *
- * Google JS Style Guide compliant.
+ * The discretization uses an Euler-Maruyama step for the Heston
+ * component plus a small additive roughness shock; the resulting path is
+ * floored at `1e-6` so that `V_t` stays strictly positive.
+ *
+ * @see Gatheral, J., Jaisson, T., Rosenbaum, M. (2018). Volatility is
+ *   rough. *Quantitative Finance* 18(6), 933-949.
  */
 
-import { generateFGN, randn, randnBatch, fractionalKernel } from '../random.js'
+import {generateFGN, randn, randnBatch, fractionalKernel} from '../random.js';
 
 /**
- * Simulates rFSV process.
- * The volatility has both a classical Heston component and a rough component
- * driven by fractional Brownian motion.
+ * Simulates a single rFSV variance path.
+ *
+ * The Euler-Maruyama step writes
+ *
+ *     V_t = V_{t-1} + theta * (mu - V_{t-1}) * dt
+ *                 + nu * V_{t-1}^alpha * sqrt(dt) * Z_t
+ *                 + roughness contribution
+ *
+ * where the roughness term is `nu * 0.1 * sqrt(dt) * ∑_{j&lt;t} K(t-j) * fGn_j`.
+ * The constant `0.1` is a small multiplier that prevents the rough term
+ * from dominating the path at typical calibration scales.
+ *
+ * Path values are floored at `1e-6` for numerical robustness.
  *
  * @param {Object} params Model parameters.
- * @param {number} params.nSteps Number of time steps.
- * @param {number} params.T Terminal time.
- * @param {number} params.h Hurst parameter (roughness).
- * @param {number} params.theta Mean reversion speed.
- * @param {number} params.mu Long-term variance mean.
- * @param {number} params.nu Volatility of volatility.
- * @param {number} params.alpha Diffusion exponent (default 0.5 for square-root).
- * @param {number} params.v0 Initial variance.
- * @return {{volPath: Float64Array, times: Array&lt;number>}}
+ * @param {number=} params.nSteps Number of time steps (default `252`).
+ * @param {number=} params.T Terminal time (default `1.0`).
+ * @param {number=} params.h Hurst parameter (default `0.1`).
+ * @param {number=} params.theta Mean-reversion speed (default `2.0`).
+ * @param {number=} params.mu Long-term variance mean (default `0.04`).
+ * @param {number=} params.nu Vol-of-vol (default `0.5`).
+ * @param {number=} params.alpha Diffusion exponent (default `0.5`,
+ *   matching the Heston square-root form).
+ * @param {number=} params.v0 Initial variance (default `0.04`).
+ * @return {{volPath: Float64Array, times: Array&lt;number>}} Simulated
+ *   variance path and time grid.
  */
-export function rFSV (params = {}) {
-  const nSteps = params.nSteps || 252
-  const T = params.T || 1.0
-  const dt = T / nSteps
-  const H = params.h || 0.1
-  const theta = params.theta || 2.0
-  const mu = params.mu || 0.04
-  const nu = params.nu || 0.5
-  const alpha = params.alpha !== undefined ? params.alpha : 0.5
-  const v0 = params.v0 || 0.04
+export function rFSV(params = {}) {
+  const nSteps = params.nSteps || 252;
+  const T = params.T || 1.0;
+  const dt = T / nSteps;
+  const H = params.h || 0.1;
+  const theta = params.theta || 2.0;
+  const mu = params.mu || 0.04;
+  const nu = params.nu || 0.5;
+  const alpha = params.alpha !== undefined ? params.alpha : 0.5;
+  const v0 = params.v0 || 0.04;
 
   // Precompute the fractional kernel for roughness
-  const kernel = fractionalKernel(H, nSteps, dt)
+  const kernel = fractionalKernel(H, nSteps, dt);
 
-  const times = new Array(nSteps + 1)
-  times[0] = 0
+  const times = new Array(nSteps + 1);
+  times[0] = 0;
   for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt
+    times[t] = t * dt;
   }
 
-  const volPath = new Float64Array(nSteps + 1)
-  volPath[0] = v0
+  const volPath = new Float64Array(nSteps + 1);
+  volPath[0] = v0;
 
   // Generate fractional Gaussian noise for the rough component
-  const fGn = generateFGN(nSteps + 1, H)
+  const fGn = generateFGN(nSteps + 1, H);
   // Standard normal for the diffusion
-  const normals = randnBatch(nSteps + 1)
+  const normals = randnBatch(nSteps + 1);
 
   for (let t = 1; t &lt;= nSteps; t++) {
-    const prevVol = volPath[t - 1]
-    const volDrift = theta * (mu - prevVol) * dt
-    const volDiffusion = nu * Math.pow(prevVol, alpha) * Math.sqrt(dt) * normals[t]
+    const prevVol = volPath[t - 1];
+    const volDrift = theta * (mu - prevVol) * dt;
+    const volDiffusion =
+      nu * Math.pow(prevVol, alpha) * Math.sqrt(dt) * normals[t];
 
     // Rough component from fractional noise
     // The roughness term: nu * integral K(t-s) dW_s
     // We use the fGn as the driver for the rough component
-    let roughComp = 0
+    let roughComp = 0;
     for (let j = 0; j &lt; t; j++) {
-      roughComp += kernel[t - 1 - j] * fGn[j]
+      roughComp += kernel[t - 1 - j] * fGn[j];
     }
-    roughComp *= Math.sqrt(dt)
+    roughComp *= Math.sqrt(dt);
 
-    volPath[t] = Math.max(1e-6, prevVol + volDrift + volDiffusion + roughComp * nu * 0.1)
+    volPath[t] = Math.max(
+      1e-6,
+      prevVol + volDrift + volDiffusion + roughComp * nu * 0.1,
+    );
   }
 
-  return { volPath, times }
+  return {volPath, times};
 }
 
 /**
- * Generates price path under rFSV.
- * dS_t = vol_t * S_t * dW_t
+ * Generates an arithmetic-Brownian-motion price path under an
+ * independently simulated rFSV variance.
+ *
+ * Steps:
+ *
+ * 1. Call {@link rFSV} to obtain a variance trajectory.
+ * 2. Iterate the SDE
+ *
+ *        dS_t = vol_t * S_t * (drift * dt + dW_t * sqrt(dt))
+ *
+ *    using freshly drawn normals (no correlation with the variance
+ *    driver — the `Price` flavor assumes independent drivers, which is a
+ *    convenient simplification for offline testing).
+ *
+ * Note that this routine generates an *independent* noise realization
+ * from the one used inside {@link rFSV}; the paper-faithful correlated
+ * version would require regenerating the drivers with shared Brownian
+ * motion. For experiments that demand correlation, use
+ * {@link rBergomiPrice} instead.
  *
  * @param {Object} params Model parameters.
- * @param {number} params.drift Drift (default 0).
- * @param {number} params.s0 Initial price (default 100).
- * @param {number} params.nSteps Number of time steps.
- * @param {number} params.T Terminal time.
- * @param {number} params.h Hurst parameter.
- * @param {number} params.theta Mean reversion speed.
- * @param {number} params.mu Long-term mean.
- * @param {number} params.nu Vol of vol.
- * @param {number} params.v0 Initial variance.
- * @return {{prices: Float64Array, volatilities: Float64Array, times: Array&lt;number>}}
+ * @param {number=} params.drift Drift (default `0`).
+ * @param {number=} params.s0 Initial price (default `100`).
+ * @param {number=} params.nSteps Number of time steps (default `252`).
+ * @param {number=} params.T Terminal time (default `1.0`).
+ * @param {number=} params.h Hurst parameter (default `0.1`).
+ * @param {number=} params.theta Mean-reversion speed (default `2.0`).
+ * @param {number=} params.mu Long-term variance mean (default `0.04`).
+ * @param {number=} params.nu Vol-of-vol (default `0.5`).
+ * @param {number=} params.v0 Initial variance (default `0.04`).
+ * @return {{prices: Float64Array, volatilities: Float64Array, times:
+ *   Array&lt;number>}} Simulated price, the underlying variance path, and
+ *   the shared time grid.
  */
-export function rFSVPrice (params = {}) {
+export function rFSVPrice(params = {}) {
   const volResult = rFSV({
     nSteps: params.nSteps || 252,
     T: params.T || 1.0,
@@ -132,32 +171,32 @@ export function rFSVPrice (params = {}) {
     theta: params.theta || 2.0,
     mu: params.mu !== undefined ? params.mu : 0.04,
     nu: params.nu || 0.5,
-    v0: params.v0 || 0.04
-  })
+    v0: params.v0 || 0.04,
+  });
 
-  const nSteps = params.nSteps || 252
-  const T = params.T || 1.0
-  const dt = T / nSteps
-  const s0 = params.s0 || 100
-  const drift = params.drift !== undefined ? params.drift : 0
+  const nSteps = params.nSteps || 252;
+  const T = params.T || 1.0;
+  const dt = T / nSteps;
+  const s0 = params.s0 || 100;
+  const drift = params.drift !== undefined ? params.drift : 0;
 
-  const prices = new Float64Array(nSteps + 1)
-  prices[0] = s0
+  const prices = new Float64Array(nSteps + 1);
+  prices[0] = s0;
 
-  const { volPath, times } = volResult
+  const {volPath, times} = volResult;
 
   for (let t = 0; t &lt; nSteps; t++) {
-    const vol = Math.sqrt(volPath[t + 1])
-    const z = randn()
-    const dS = vol * prices[t] * (drift * dt + z * Math.sqrt(dt))
-    prices[t + 1] = prices[t] + dS
+    const vol = Math.sqrt(volPath[t + 1]);
+    const z = randn();
+    const dS = vol * prices[t] * (drift * dt + z * Math.sqrt(dt));
+    prices[t + 1] = prices[t] + dS;
   }
 
   return {
     prices,
     volatilities: volPath,
-    times
-  }
+    times,
+  };
 }
 </code></pre>
         </article>
@@ -169,13 +208,13 @@ export function rFSVPrice (params = {}) {
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mPRE">mPRE</a></li><li><a href="global.html#mPREExact">mPREExact</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Sun Jul 12 2026 16:21:25 GMT+0530 (India Standard Time)
 </footer>
 
 <script> prettyPrint(); </script>

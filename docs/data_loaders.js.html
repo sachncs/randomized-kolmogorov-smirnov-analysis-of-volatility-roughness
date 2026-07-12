@@ -27,184 +27,253 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * Data loading utilities for RK-SAVR experiments.
- * CSV and JSON parsing with validation.
+ * @fileoverview Data loading utilities for RK-SAVR experiments.
+ *
+ * Lightweight CSV/JSON parsers with a handful of validation helpers
+ * (date parsing, gap detection, downsampling). The parsers are designed
+ * to be predictable and dependency-free rather than maximally
+ * featureful: every row is materialized as a plain object with the
+ * requested type conversion already applied.
+ *
+ * The split-line state machine in `_splitCSVLine` understands double
+ * quotes but does **not** attempt to handle escaped quotes or
+ * escaped commas inside a quoted field; for richer CSV dialects plug in
+ * a dedicated parser (e.g. via `registerModel` pattern in `models/`).
  */
 
 /**
- * Parses a CSV string into an array of objects.
- * Expects the first row to be headers.
- * Handles basic quoting and comma separation.
+ * Parses a CSV string into an array of plain objects.
  *
- * @param {string} csv Raw CSV string.
- * @param {Object} opts Options.
- * @param {string} opts.dateField Field to parse as Date (default 'date').
- * @param {Array&lt;string>} opts.numericFields Fields to parse as numbers.
- * @return {Array&lt;Object>} Parsed rows.
+ * Expected input shape:
+ * - The first non-empty line is the header row.
+ * - Each subsequent line is a record with the same column count as the
+ *   header.
+ * - Fields can be optionally wrapped in double quotes; quotes may embed
+ *   commas but not other escapes.
+ *
+ * Type coercion:
+ * - `opts.dateField` (default `"date"`) is parsed via `new Date(...)`.
+ * - Any field listed in `opts.numericFields` is parsed via `parseFloat`.
+ * - All other fields are kept as trimmed strings.
+ *
+ * Error handling:
+ * - Empty input returns `[]`.
+ * - Mismatched column counts throw with a descriptive message.
+ * - Non-numeric values in declared numeric columns throw.
+ *
+ * @param {string} csv Raw CSV content.
+ * @param {Object} opts Parser options.
+ * @param {string=} opts.dateField Date column name (default `"date"`).
+ * @param {Array&lt;string>=} opts.numericFields Columns to coerce to numbers.
+ * @return {Array&lt;Object>} Parsed rows, one per non-empty CSV line.
+ * @throws {Error} When the input is malformed.
  */
-export function parseCSV (csv, opts = {}) {
-  if (typeof csv !== 'string') throw new Error('csv must be a string')
-  if (csv.trim().length === 0) return []
+export function parseCSV(csv, opts = {}) {
+  if (typeof csv !== 'string') throw new Error('csv must be a string');
+  if (csv.trim().length === 0) return [];
 
-  const lines = csv.trim().split('\n')
-  if (lines.length === 0) return []
+  const lines = csv.trim().split('\n');
+  if (lines.length === 0) return [];
 
-  const headers = _splitCSVLine(lines[0])
-  const dateField = opts.dateField || 'date'
-  const numericFields = opts.numericFields || []
+  const headers = _splitCSVLine(lines[0]);
+  const dateField = opts.dateField || 'date';
+  const numericFields = opts.numericFields || [];
 
-  const result = []
+  const result = [];
   for (let i = 1; i &lt; lines.length; i++) {
-    const line = lines[i].trim()
-    if (line.length === 0) continue
-    const values = _splitCSVLine(line)
+    const line = lines[i].trim();
+    if (line.length === 0) continue;
+    const values = _splitCSVLine(line);
     if (values.length !== headers.length) {
-      throw new Error(`Row ${i + 1} has ${values.length} columns, expected ${headers.length}`)
+      throw new Error(
+        `Row ${i + 1} has ${values.length} columns, expected ${headers.length}`,
+      );
     }
 
-    const row = {}
+    const row = {};
     for (let j = 0; j &lt; headers.length; j++) {
-      const key = headers[j].trim()
-      const raw = values[j].trim()
+      const key = headers[j].trim();
+      const raw = values[j].trim();
       if (numericFields.includes(key)) {
-        const num = parseFloat(raw)
-        if (Number.isNaN(num)) throw new Error(`Non-numeric value "${raw}" in row ${i + 1}, column "${key}"`)
-        row[key] = num
+        const num = parseFloat(raw);
+        if (Number.isNaN(num))
+          throw new Error(
+            `Non-numeric value "${raw}" in row ${i + 1}, column "${key}"`,
+          );
+        row[key] = num;
       } else if (key === dateField) {
-        const d = new Date(raw)
-        if (Number.isNaN(d.getTime())) throw new Error(`Invalid date "${raw}" in row ${i + 1}`)
-        row[key] = d
+        const d = new Date(raw);
+        if (Number.isNaN(d.getTime()))
+          throw new Error(`Invalid date "${raw}" in row ${i + 1}`);
+        row[key] = d;
       } else {
-        row[key] = raw
+        row[key] = raw;
       }
     }
-    result.push(row)
+    result.push(row);
   }
 
-  return result
+  return result;
 }
 
 /**
- * Splits a CSV line respecting quoted fields.
+ * Splits a single CSV line respecting double-quoted regions.
+ *
+ * States:
+ * - Outside quotes: a comma terminates the current field.
+ * - Inside quotes: a quote toggles back to "outside", all other chars are
+ *   kept verbatim.
+ *
  * @private
- * @param {string} line
- * @return {Array&lt;string>}
+ * @param {string} line Raw CSV line (no trailing newline).
+ * @return {Array&lt;string>} Split fields. Empty trailing field is preserved.
  */
-function _splitCSVLine (line) {
-  const result = []
-  let current = ''
-  let inQuotes = false
+function _splitCSVLine(line) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
 
   for (let i = 0; i &lt; line.length; i++) {
-    const ch = line[i]
+    const ch = line[i];
     if (ch === '"') {
-      inQuotes = !inQuotes
+      inQuotes = !inQuotes;
     } else if (ch === ',' &amp;&amp; !inQuotes) {
-      result.push(current)
-      current = ''
+      result.push(current);
+      current = '';
     } else {
-      current += ch
+      current += ch;
     }
   }
-  result.push(current)
-  return result
+  result.push(current);
+  return result;
 }
 
 /**
- * Extracts a numeric time series from parsed CSV rows.
+ * Extracts a `{date, value}` series from a parsed CSV array.
  *
- * @param {Array&lt;Object>} rows Parsed rows.
- * @param {string} field Field name to extract.
- * @param {Object} opts Options.
- * @param {boolean} opts.sortByDate Sort by date field before extraction.
- * @param {string} opts.dateField Date field name (default 'date').
- * @return {Array&lt;{date: Date, value: number}>} Time series.
+ * Rows that are missing `field` are skipped; the resulting series is
+ * optionally sorted by `dateField` when the caller asks. Sorting uses
+ * the standard JS `Date` arithmetic, so the dates must be real `Date`
+ * instances.
+ *
+ * @param {Array&lt;Object>} rows Parsed CSV rows.
+ * @param {string} field Numeric field name to extract.
+ * @param {Object} opts Extraction options.
+ * @param {boolean=} opts.sortByDate When `true`, sort by the date field
+ *   before extraction (default `false`).
+ * @param {string=} opts.dateField Date field name (default `"date"`).
+ * @return {Array&lt;{date: Date, value: number}>} Series of `{date, value}`
+ *   points.
+ * @throws {Error} When `rows` is not an array or `field` is not a string.
  */
-export function extractSeries (rows, field, opts = {}) {
-  if (!Array.isArray(rows)) throw new Error('rows must be an array')
-  if (typeof field !== 'string') throw new Error('field must be a string')
+export function extractSeries(rows, field, opts = {}) {
+  if (!Array.isArray(rows)) throw new Error('rows must be an array');
+  if (typeof field !== 'string') throw new Error('field must be a string');
 
-  const dateField = opts.dateField || 'date'
+  const dateField = opts.dateField || 'date';
   const data = rows
     .filter((r) => r[field] !== undefined &amp;&amp; r[field] !== null)
-    .map((r) => ({ date: r[dateField], value: r[field] }))
+    .map((r) => ({date: r[dateField], value: r[field]}));
 
   if (opts.sortByDate &amp;&amp; data[0] &amp;&amp; data[0].date instanceof Date) {
-    data.sort((a, b) => a.date - b.date)
+    data.sort((a, b) => a.date - b.date);
   }
 
-  return data
+  return data;
 }
 
 /**
- * Loads and parses a JSON array of objects.
+ * Parses a JSON string that must encode an array of objects.
+ *
+ * The function deliberately refuses non-array JSON to keep the loader
+ * simple. Empty or whitespace-only input returns `[]`.
  *
  * @param {string} json Raw JSON string.
- * @return {Array&lt;Object>} Parsed objects.
+ * @return {Array&lt;Object>} Parsed objects (empty if the input is empty).
+ * @throws {Error} When the input is not valid JSON or does not decode
+ *   to an array.
  */
-export function parseJSON (json) {
-  if (typeof json !== 'string') throw new Error('json must be a string')
-  if (json.trim().length === 0) return []
+export function parseJSON(json) {
+  if (typeof json !== 'string') throw new Error('json must be a string');
+  if (json.trim().length === 0) return [];
   try {
-    const data = JSON.parse(json)
-    if (!Array.isArray(data)) throw new Error('JSON must be an array of objects')
-    return data
+    const data = JSON.parse(json);
+    if (!Array.isArray(data))
+      throw new Error('JSON must be an array of objects');
+    return data;
   } catch (err) {
-    throw new Error(`Invalid JSON: ${err.message}`)
+    throw new Error(`Invalid JSON: ${err.message}`);
   }
 }
 
 /**
- * Validates that a time series has no gaps larger than a threshold.
+ * Validates that a time series does not contain temporal gaps larger
+ * than `maxGapMs`.
  *
- * @param {Array&lt;{date: Date}>} series Time series with dates.
+ * Returns the maximum observed gap, the full list of pairwise gap
+ * lengths, and a `valid` flag for the threshold check. Series with
+ * fewer than two points are deemed valid by definition.
+ *
+ * @param {Array&lt;{date: Date}>} series Time series with `Date` fields.
  * @param {number} maxGapMs Maximum allowed gap in milliseconds.
- * @return {{valid: boolean, maxGap: number, gaps: Array&lt;number>}} Validation result.
+ * @return {{valid: boolean, maxGap: number, gaps: Array&lt;number>}}
+ *   Validation result.
  */
-export function validateNoGaps (series, maxGapMs) {
+export function validateNoGaps(series, maxGapMs) {
   if (!Array.isArray(series) || series.length &lt; 2) {
-    return { valid: true, maxGap: 0, gaps: [] }
+    return {valid: true, maxGap: 0, gaps: []};
   }
 
-  const gaps = []
-  let maxGap = 0
+  const gaps = [];
+  let maxGap = 0;
   for (let i = 1; i &lt; series.length; i++) {
-    const gap = series[i].date.getTime() - series[i - 1].date.getTime()
-    gaps.push(gap)
-    if (gap > maxGap) maxGap = gap
+    const gap = series[i].date.getTime() - series[i - 1].date.getTime();
+    gaps.push(gap);
+    if (gap > maxGap) maxGap = gap;
   }
 
-  return { valid: maxGap &lt;= maxGapMs, maxGap, gaps }
+  return {valid: maxGap &lt;= maxGapMs, maxGap, gaps};
 }
 
 /**
- * Downsamples a time series to a target frequency by averaging.
+ * Downsamples a time series by averaging values that fall into fixed
+ * `intervalMs`-wide buckets.
+ *
+ * The bucket index is computed as
+ *     `floor(date.getTime() / intervalMs)`,
+ * so all buckets share the same left edge (`0`, `intervalMs`,
+ * `2 * intervalMs`, ...). The output is sorted by date and every
+ * returned point carries the *bucket start* (not the average timestamp)
+ * as its `date` value.
  *
  * @param {Array&lt;{date: Date, value: number}>} series Input series.
- * @param {number} intervalMs Target interval in milliseconds.
- * @return {Array&lt;{date: Date, value: number}>} Downsampled series.
+ * @param {number} intervalMs Bucket length in milliseconds.
+ * @return {Array&lt;{date: Date, value: number}>} One entry per non-empty
+ *   bucket, sorted chronologically.
+ * @throws {Error} When `series` is not an array or `intervalMs &lt;= 0`.
  */
-export function downsample (series, intervalMs) {
-  if (!Array.isArray(series)) throw new Error('series must be an array')
-  if (intervalMs &lt;= 0) throw new Error('intervalMs must be positive')
-  if (series.length === 0) return []
+export function downsample(series, intervalMs) {
+  if (!Array.isArray(series)) throw new Error('series must be an array');
+  if (intervalMs &lt;= 0) throw new Error('intervalMs must be positive');
+  if (series.length === 0) return [];
 
-  const buckets = new Map()
+  const buckets = new Map();
   for (const point of series) {
-    const bucketTime = Math.floor(point.date.getTime() / intervalMs) * intervalMs
-    const bucket = buckets.get(bucketTime) || { sum: 0, count: 0 }
-    bucket.sum += point.value
-    bucket.count++
-    buckets.set(bucketTime, bucket)
+    const bucketTime =
+      Math.floor(point.date.getTime() / intervalMs) * intervalMs;
+    const bucket = buckets.get(bucketTime) || {sum: 0, count: 0};
+    bucket.sum += point.value;
+    bucket.count++;
+    buckets.set(bucketTime, bucket);
   }
 
-  const result = []
+  const result = [];
   for (const [time, bucket] of buckets) {
-    result.push({ date: new Date(time), value: bucket.sum / bucket.count })
+    result.push({date: new Date(time), value: bucket.sum / bucket.count});
   }
 
-  result.sort((a, b) => a.date - b.date)
-  return result
+  result.sort((a, b) => a.date - b.date);
+  return result;
 }
 </code></pre>
         </article>
@@ -216,13 +285,13 @@ export function downsample (series, intervalMs) {
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mPRE">mPRE</a></li><li><a href="global.html#mPREExact">mPREExact</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Sun Jul 12 2026 16:21:25 GMT+0530 (India Standard Time)
 </footer>
 
 <script> prettyPrint(); </script>

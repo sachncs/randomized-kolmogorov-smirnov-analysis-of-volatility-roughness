@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>JSDoc: Source: models/fou.js</title>
+    <title>JSDoc: Source: optimization/adaptiveGridSearch.js</title>
 
     <script src="scripts/prettify/prettify.js"> </script>
     <script src="scripts/prettify/lang-css.js"> </script>
@@ -17,7 +17,7 @@
 
 <div id="main">
 
-    <h1 class="page-title">Source: models/fou.js</h1>
+    <h1 class="page-title">Source: optimization/adaptiveGridSearch.js</h1>
 
     
 
@@ -27,175 +27,82 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * @fileoverview Fractional Ornstein-Uhlenbeck (fOU) simulator.
+ * @fileoverview Adaptive grid search with Brent refinement.
  *
- * Mean-reverting process driven by fractional Brownian motion:
- *
- *     dX_t = theta * (mu - X_t) dt + sigma * dB^H_t
- *
- * where `B^H` is fractional Brownian motion with Hurst parameter `H`.
- *
- * - For `H = 0.5` the driver reduces to ordinary Brownian motion and
- *   the simulator switches to an exact discretization (the Vasicek
- *   recursion).
- * - For `H != 0.5` we fall back to Euler-Maruyama using a pre-generated
- *   fGN sample; this introduces `O(sqrt(dt))` bias but is adequate for
- *   path generation at the typical sample sizes used here.
- *
- * The `exactOU` companion uses a fully consistent fractional integral
- * discretization that is more accurate but `O(n^2)` per path.
+ * A coarse-to-fine 1D optimizer: it lays down a uniform grid, finds the
+ * current best point, tightens the search interval around it by a
+ * factor of two, then refines the grid `refineIters` times. After the
+ * grid stage the result is polished with {@link brentMinimize} so the
+ * returned `x` is precise to the requested `tol`.
  */
 
-import {generateFGN, randn} from '../random.js';
+import {brentMinimize} from './brent.js';
 
 /**
- * Simulates an fOU path using Euler-Maruyama (or exact Vasicek when
- * `H = 0.5`).
+ * Adaptive grid search with Brent refinement for 1D minimization.
  *
- * The exact Vasicek recursion for `H = 0.5` is
+ * Algorithm:
  *
- *     X_{t+1} = mu + (X_t - mu) * exp(-theta * dt)
- *                      + sigma * sqrt((1 - exp(-2 theta dt)) / (2 theta))
- *                        * Z_{t+1}
+ * 1. Initialize with the midpoint of `[min, max]`.
+ * 2. Repeat `refineIters` times:
+ *    - Sample `gridSize` evenly spaced points across `[a, b]`.
+ *    - Track the best point.
+ *    - Shrink `[a, b]` to `[best - 2*step, best + 2*step]` clamped to the
+ *      original interval.
+ *    - Stop early if `[a, b]` shrinks below `tol`.
+ * 3. Polish the local minimum with Brent's method using `bestX` as the
+ *    initial guess.
  *
- * which avoids the bias introduced by naive EM for the standard OU
- * process.
+ * The Brent refinement makes the function value at the returned `x`
+ * accurate to machine epsilon in nearly all cases.
  *
- * @param {Object} params Model parameters.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
+ * @param {function(number): number} f Objective function (1D).
+ * @param {number} min Lower bound.
+ * @param {number} max Upper bound.
+ * @param {Object} opts Algorithm options.
+ * @param {number=} opts.gridSize Number of coarse-grid points per
+ *   refinement (default `50`).
+ * @param {number=} opts.refineIters Number of refinement rounds
+ *   (default `3`).
+ * @param {number=} opts.tol Convergence tolerance (default `1e-7`).
+ * @return {{x: number, f: number}} Best point and its objective value.
+ * @throws {Error} When `gridSize &lt;= 1`.
  */
-export function fOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
-
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
+export function adaptiveGridSearch(f, min, max, opts = {}) {
+  const gridSize = opts.gridSize || 50;
+  if (gridSize &lt;= 1) {
+    throw new Error('gridSize must be > 1');
   }
+  const refineIters = opts.refineIters || 3;
+  const tol = opts.tol || 1e-7;
 
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
+  let a = min;
+  let b = max;
+  let bestX = (a + b) / 2;
+  let bestF = f(bestX);
 
-  if (H === 0.5) {
-    // Exact discretization for standard OU
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
+  for (let refine = 0; refine &lt; refineIters; refine++) {
+    const step = (b - a) / (gridSize - 1);
 
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
-    }
-  } else {
-    // Euler-Maruyama for fractional OU
-    // Generate fractional Gaussian noise
-    const fGn = generateFGN(nSteps, H);
-    const sqrtDt = Math.sqrt(dt);
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-      const diffusion = sigma * fGn[t - 1] * sqrtDt;
-      path[t] = path[t - 1] + drift + diffusion;
-    }
-  }
-
-  return {path, times};
-}
-
-/**
- * "Exact" Riemann-Liouville fractional-integral fOU simulator.
- *
- * Replaces the Euler-Maruyama diffusion of {@link fOU} with an exact
- * Riemann-Liouville integral of the Brownian increments against a
- * precomputed kernel
- *
- *     K(i) = sqrt(2H) * (i * dt)^{H - 0.5}
- *
- * Path update becomes
- *
- *     X_{t+1} = X_t + theta * (mu - X_t) * dt + sigma * sqrt(dt) * I_{t+1}
- *     I_{t+1} = sum_{j &lt;= t} K(t - j) * dW_j
- *
- * The integral is `O(t)` per step and the entire path is `O(n^2)` in
- * `nSteps`, so this is reserved for short series or experiments that
- * need to isolate discretization error.
- *
- * @param {Object} params Same shape as {@link fOU}.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
- */
-export function exactOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
-
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
-  }
-
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
-
-  if (H === 0.5) {
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
-    }
-  } else {
-    // Precompute kernel for fractional integral
-    const kernel = new Float64Array(nSteps);
-    const coeff = Math.sqrt(2 * H);
-    for (let i = 0; i &lt; nSteps; i++) {
-      const t = (i + 1) * dt;
-      kernel[i] = coeff * Math.pow(t, H - 0.5);
-    }
-
-    // Generate fBM increments
-    const fGn = generateFGN(nSteps, H);
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-
-      // Fractional integral: sum_{j=0}^{t-1} K(t-j) * dW_j
-      let fracInt = 0;
-      for (let j = 0; j &lt; t; j++) {
-        fracInt += kernel[t - 1 - j] * fGn[j];
+    for (let i = 0; i &lt; gridSize; i++) {
+      const x = a + i * step;
+      const fx = f(x);
+      if (fx &lt; bestF) {
+        bestF = fx;
+        bestX = x;
       }
-      fracInt *= Math.sqrt(dt);
-
-      path[t] = path[t - 1] + drift + sigma * fracInt;
     }
+
+    // Shrink the bracket to ~4 grid cells around the current best.
+    const newA = Math.max(a, bestX - step * 2);
+    const newB = Math.min(b, bestX + step * 2);
+    a = newA;
+    b = newB;
+
+    if (b - a &lt; tol) break;
   }
 
-  return {path, times};
+  return brentMinimize(f, a, bestX, b, tol);
 }
 </code></pre>
         </article>

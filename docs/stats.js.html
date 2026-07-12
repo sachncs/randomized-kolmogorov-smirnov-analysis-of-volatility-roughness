@@ -27,253 +27,332 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * Statistical utilities for RK-SAVR.
- * Google JS Style Guide compliant.
+ * @fileoverview Statistical primitives powering the RK-SAVR estimator.
+ *
+ * This module contains:
+ *
+ * - `ksDistance` / `ksDistanceRescaled`: two-sample Kolmogorov-Smirnov
+ *   statistic with an optional merged-pointer walk.
+ * - `shuffle`: an unbiased Fisher-Yates shuffle (used everywhere a random
+ *   permutation is needed).
+ * - `randomSample`: Floyd's Algorithm R reservoir sampler (O(n) time, O(k)
+ *   space).
+ * - `blockPermutation`: the paper's block-random permutation primitive,
+ *   which decorrelates serial dependence while preserving the marginal
+ *   distribution.
+ *
+ * All routines here are allocation-aware and accept either `Array` or
+ * `Float64Array` inputs. They depend only on the seeded PRNG exposed by
+ * `prng.js`, so setting a seed before any of these calls makes a pipeline
+ * fully deterministic.
+ *
+ * @see ./rksavr.js for the estimator that consumes these primitives.
+ * @see ./prng.js for the seeded random source.
  */
 
-import { random } from './prng.js'
+import {random} from './prng.js';
 
 /**
- * Computes the Kolmogorov-Smirnov distance between two samples.
- * D = sup_x |F_n(x) - G_m(x)| where F_n and G_m are empirical CDFs.
- * Uses the two-sample KS statistic computation.
- * @param {Array&lt;number>|Float64Array} sample1
- * @param {Array&lt;number>|Float64Array} sample2
- * @param {boolean} isSorted Whether the samples are already sorted.
- * @return {number}
+ * Computes the two-sample Kolmogorov-Smirnov distance.
+ *
+ * Algorithm: a linear merged-pointer walk over the sorted order statistics.
+ * As we walk through the sorted union we maintain the empirical CDF values
+ * `F_n(x) = (i + 1) / n` and `G_m(x) = j / m` at the current position and
+ * record the absolute difference. Sorting first dominates the cost; the
+ * walk itself is `O(n + m)` where `n = sample1.length` and
+ * `m = sample2.length`.
+ *
+ * Input validation:
+ * - Both samples must be non-empty arrays or `Float64Array`s.
+ * - All values must be finite (no `NaN`, `+Infinity`, `-Infinity`).
+ *
+ * Ties: when values are equal the walk advances both pointers and uses
+ * `(i + 1) / n` vs. `(j + 1) / m` for the distance — this matches the
+ * standard two-sided statistic.
+ *
+ * @param {Array&lt;number>|Float64Array} sample1 First empirical sample.
+ * @param {Array&lt;number>|Float64Array} sample2 Second empirical sample.
+ * @param {boolean} isSorted If `true`, skip sorting both samples. Off by
+ *   default; setting this to `true` is the user's responsibility and is
+ *   the hot path used inside `rkSAVR`'s prepared-samples loop.
+ * @return {number} KS distance `sup_x |F_n(x) - G_m(x)|` in `[0, 1]`.
+ * @throws {Error} When either input is not an array/typed array, is empty,
+ *   or contains non-finite values.
  */
-export function ksDistance (sample1, sample2, isSorted = false) {
+export function ksDistance(sample1, sample2, isSorted = false) {
   if (!Array.isArray(sample1) &amp;&amp; !(sample1 instanceof Float64Array)) {
-    throw new Error('sample1 must be an array')
+    throw new Error('sample1 must be an array');
   }
   if (!Array.isArray(sample2) &amp;&amp; !(sample2 instanceof Float64Array)) {
-    throw new Error('sample2 must be an array')
+    throw new Error('sample2 must be an array');
   }
   if (sample1.length === 0 || sample2.length === 0) {
-    throw new Error('ksDistance requires non-empty arrays')
+    throw new Error('ksDistance requires non-empty arrays');
   }
-  if (sample1.some((v) => !Number.isFinite(v)) || sample2.some((v) => !Number.isFinite(v))) {
-    throw new Error('ksDistance requires finite values')
+  if (
+    sample1.some((v) => !Number.isFinite(v)) ||
+    sample2.some((v) => !Number.isFinite(v))
+  ) {
+    throw new Error('ksDistance requires finite values');
   }
-  const s1 = isSorted ? sample1 : sample1.slice().sort((a, b) => a - b)
-  const s2 = isSorted ? sample2 : sample2.slice().sort((a, b) => a - b)
+  const s1 = isSorted ? sample1 : sample1.slice().sort((a, b) => a - b);
+  const s2 = isSorted ? sample2 : sample2.slice().sort((a, b) => a - b);
 
-  const n1 = s1.length
-  const n2 = s2.length
+  const n1 = s1.length;
+  const n2 = s2.length;
 
-  let i = 0
-  let j = 0
-  let maxDist = 0
+  let i = 0;
+  let j = 0;
+  let maxDist = 0;
 
   while (i &lt; n1 &amp;&amp; j &lt; n2) {
-    const v1 = s1[i]
-    const v2 = s2[j]
+    const v1 = s1[i];
+    const v2 = s2[j];
 
-    // Compute CDF values at current positions before advancing
-    // F_n(x) = (number of elements &lt;= x) / n
-    // When values are equal, both advance (tie case)
     if (v1 &lt; v2) {
-      // s1[i] is strictly less than s2[j]
-      // F_n = (i+1)/n1, G_m = j/n2
-      const dist = Math.abs((i + 1) / n1 - j / n2)
-      if (dist > maxDist) maxDist = dist
-      i++
+      const dist = Math.abs((i + 1) / n1 - j / n2);
+      if (dist > maxDist) maxDist = dist;
+      i++;
     } else if (v1 > v2) {
-      // s2[j] is strictly less than s1[i]
-      // F_n = i/n1, G_m = (j+1)/n2
-      const dist = Math.abs(i / n1 - (j + 1) / n2)
-      if (dist > maxDist) maxDist = dist
-      j++
+      const dist = Math.abs(i / n1 - (j + 1) / n2);
+      if (dist > maxDist) maxDist = dist;
+      j++;
     } else {
-      // Tie: both values equal
-      // F_n = (i+1)/n1, G_m = (j+1)/n2
-      const dist = Math.abs((i + 1) / n1 - (j + 1) / n2)
-      if (dist > maxDist) maxDist = dist
-      i++
-      j++
+      // Tied values: advance both pointers and compare the *upper* CDFs.
+      const dist = Math.abs((i + 1) / n1 - (j + 1) / n2);
+      if (dist > maxDist) maxDist = dist;
+      i++;
+      j++;
     }
   }
 
-  // Check remaining elements
+  // Drain the remaining tail in whichever sample still has values.
   while (i &lt; n1) {
-    const dist = Math.abs((i + 1) / n1 - j / n2)
-    if (dist > maxDist) maxDist = dist
-    i++
+    const dist = Math.abs((i + 1) / n1 - j / n2);
+    if (dist > maxDist) maxDist = dist;
+    i++;
   }
 
   while (j &lt; n2) {
-    const dist = Math.abs(i / n1 - (j + 1) / n2)
-    if (dist > maxDist) maxDist = dist
-    j++
+    const dist = Math.abs(i / n1 - (j + 1) / n2);
+    if (dist > maxDist) maxDist = dist;
+    j++;
   }
 
-  return maxDist
+  return maxDist;
 }
 
 /**
- * Computes KS distance between two pre-sorted samples after rescaling by positive factors.
- * Avoids array allocation by applying factors during the pointer walk.
- * Multiplication by a positive scalar preserves ordering, so no re-sorting is needed.
+ * Kolmogorov-Smirnov distance for **already sorted** samples that need
+ * rescaling.
+ *
+ * Equivalent to `ksDistance(a, b, true)` but applies the rescaling factors
+ * during the merged-pointer walk so no auxiliary allocation is needed.
+ * Multiplication by a positive scalar is order-preserving, so the
+ * pre-sorting of the inputs is unaffected by the choice of `factorA` and
+ * `factorB`.
+ *
+ * This is the hot path of the RK-SAVR estimator's inner loop:
+ * `O(n + m)` per evaluation, no allocations beyond the locals below.
  *
  * @param {Array&lt;number>|Float64Array} sortedA Pre-sorted sample A.
  * @param {Array&lt;number>|Float64Array} sortedB Pre-sorted sample B.
- * @param {number} factorA Positive rescaling factor for A.
+ * @param {number} factorA Positive rescaling factor for A (typically
+ *   `a^{-H}`).
  * @param {number} factorB Positive rescaling factor for B.
- * @return {number} KS distance between rescaled samples.
+ * @return {number} KS distance between the rescaled samples in `[0, 1]`.
+ * @throws {Error} When either input is not an array/typed array or is empty.
  */
-export function ksDistanceRescaled (sortedA, sortedB, factorA, factorB) {
+export function ksDistanceRescaled(sortedA, sortedB, factorA, factorB) {
   if (!Array.isArray(sortedA) &amp;&amp; !(sortedA instanceof Float64Array)) {
-    throw new Error('sortedA must be an array')
+    throw new Error('sortedA must be an array');
   }
   if (!Array.isArray(sortedB) &amp;&amp; !(sortedB instanceof Float64Array)) {
-    throw new Error('sortedB must be an array')
+    throw new Error('sortedB must be an array');
   }
   if (sortedA.length === 0 || sortedB.length === 0) {
-    throw new Error('ksDistanceRescaled requires non-empty arrays')
+    throw new Error('ksDistanceRescaled requires non-empty arrays');
   }
 
-  const n1 = sortedA.length
-  const n2 = sortedB.length
+  const n1 = sortedA.length;
+  const n2 = sortedB.length;
 
-  let i = 0
-  let j = 0
-  let maxDist = 0
+  let i = 0;
+  let j = 0;
+  let maxDist = 0;
 
+  // Pointer walk: at every step both pointers point to the smallest
+  // not-yet-consumed value in their respective samples; the CDF values
+  // are tracked implicitly through the (i, j) cursor positions.
   while (i &lt; n1 &amp;&amp; j &lt; n2) {
-    const va = sortedA[i] * factorA
-    const vb = sortedB[j] * factorB
+    const va = sortedA[i] * factorA;
+    const vb = sortedB[j] * factorB;
 
     if (va &lt; vb) {
-      const dist = Math.abs((i + 1) / n1 - j / n2)
-      if (dist > maxDist) maxDist = dist
-      i++
+      const dist = Math.abs((i + 1) / n1 - j / n2);
+      if (dist > maxDist) maxDist = dist;
+      i++;
     } else if (va > vb) {
-      const dist = Math.abs(i / n1 - (j + 1) / n2)
-      if (dist > maxDist) maxDist = dist
-      j++
+      const dist = Math.abs(i / n1 - (j + 1) / n2);
+      if (dist > maxDist) maxDist = dist;
+      j++;
     } else {
-      const dist = Math.abs((i + 1) / n1 - (j + 1) / n2)
-      if (dist > maxDist) maxDist = dist
-      i++
-      j++
+      // Tie case: advance both pointers and compare against the upper CDFs.
+      const dist = Math.abs((i + 1) / n1 - (j + 1) / n2);
+      if (dist > maxDist) maxDist = dist;
+      i++;
+      j++;
     }
   }
 
+  // Tail loop: whatever pointers remain, the opposing CDF is constant.
   while (i &lt; n1) {
-    const dist = Math.abs((i + 1) / n1 - j / n2)
-    if (dist > maxDist) maxDist = dist
-    i++
+    const dist = Math.abs((i + 1) / n1 - j / n2);
+    if (dist > maxDist) maxDist = dist;
+    i++;
   }
 
   while (j &lt; n2) {
-    const dist = Math.abs(i / n1 - (j + 1) / n2)
-    if (dist > maxDist) maxDist = dist
-    j++
+    const dist = Math.abs(i / n1 - (j + 1) / n2);
+    if (dist > maxDist) maxDist = dist;
+    j++;
   }
 
-  return maxDist
+  return maxDist;
 }
 
 /**
- * Fisher-Yates shuffle.
- * Fisher-Yates shuffle.
- * @param {Array&lt;*>} array Input array.
- * @return {Array&lt;*>} Shuffled array.
+ * Unbiased Fisher-Yates shuffle.
+ *
+ * Returns a new array; the input is never mutated. Uses the seeded PRNG
+ * exposed by `prng.js`, so the result is reproducible when a seed is set.
+ *
+ * Complexity: `O(n)` time, `O(n)` extra memory.
+ *
+ * @param {Array&lt;*>} array Input array (not modified).
+ * @return {Array&lt;*>} Shuffled copy of `array`.
  */
-export function shuffle (array) {
-  const arr = array.slice()
+export function shuffle(array) {
+  const arr = array.slice();
+  // Walk from right to left; for each position swap with a uniformly drawn
+  // earlier position. This is the textbook Knuth shuffle: every permutation
+  // is equally likely.
   for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(random() * (i + 1))
-    const tmp = arr[i]
-    arr[i] = arr[j]
-    arr[j] = tmp
+    const j = Math.floor(random() * (i + 1));
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
   }
-  return arr
+  return arr;
 }
 
-/**
- * Floyd's reservoir sampling for random sampling without replacement.
- * More efficient than Set-based collision detection.
- * @param {Array&lt;*>} array Input array.
- * @param {number} n Number of elements to sample.
- * @return {Array&lt;*>} Random sample.
- */
 /**
  * Block random permutation for decorrelating serial dependence.
- * Partitions data into blocks of length blockSize, shuffles the blocks,
- * and optionally applies a random phase offset to the starting index.
- * Preserves marginal distributions while stripping away autocorrelation.
  *
- * @param {Array&lt;*>} data Input array.
- * @param {number} blockSize Block length.
- * @param {boolean} randomPhase Whether to apply a random starting phase.
- * @return {Array&lt;*>} Permuted array.
+ * Conceptually this is the paper's "preserves marginals, kills short-range
+ * autocorrelation" operation:
+ *
+ * 1. (Optional) shift the starting index by a uniform `[-0, blockSize)`
+ *    offset so two calls with the same seed still produce different
+ *    alignments.
+ * 2. Slice the resulting series into blocks of length `blockSize` (the
+ *    first block may be shorter than `blockSize` when a phase offset was
+ *    applied).
+ * 3. Apply a Fisher-Yates shuffle to the block list.
+ * 4. Concatenate the shuffled blocks back into a single sequence.
+ *
+ * Picking `blockSize` is the user's responsibility: it should be larger than
+ * the dominant autocorrelation length in `data`. Too small and serial
+ * dependence survives; too large and the number of blocks — and therefore
+ * the effective randomization — shrinks.
+ *
+ * @param {Array&lt;*>} data Input array (not modified).
+ * @param {number} blockSize Block length; must satisfy `0 &lt; blockSize &lt;= data.length`.
+ * @param {boolean} randomPhase Whether to apply a random starting phase
+ *   offset.
+ * @return {Array&lt;*>} Permuted array containing exactly the same elements as
+ *   `data`.
+ * @throws {Error} When `data` is not array-like or `blockSize` is out of range.
  */
-export function blockPermutation (data, blockSize, randomPhase = false) {
+export function blockPermutation(data, blockSize, randomPhase = false) {
   if (!Array.isArray(data) &amp;&amp; !(data instanceof Float64Array)) {
-    throw new Error('data must be an array')
+    throw new Error('data must be an array');
   }
   if (blockSize &lt;= 0 || blockSize > data.length) {
-    throw new Error('blockSize must be positive and not exceed data length')
+    throw new Error('blockSize must be positive and not exceed data length');
   }
 
-  const n = data.length
-  let offset = 0
+  const n = data.length;
+  let offset = 0;
   if (randomPhase) {
-    offset = Math.floor(random() * blockSize)
+    offset = Math.floor(random() * blockSize);
   }
 
-  // Extract blocks starting from offset, including prefix as first block if offset > 0
-  const blocks = []
+  // Extract blocks starting from offset, including prefix as first block if
+  // offset > 0 so the permutation is always a true rearrangement of the
+  // entire input.
+  const blocks = [];
   if (offset > 0) {
-    blocks.push(data.slice(0, offset))
+    blocks.push(data.slice(0, offset));
   }
   for (let i = offset; i &lt; n; i += blockSize) {
-    blocks.push(data.slice(i, Math.min(i + blockSize, n)))
+    blocks.push(data.slice(i, Math.min(i + blockSize, n)));
   }
 
-  // Fisher-Yates shuffle on blocks
+  // Shuffle the blocks themselves (not their contents).
   for (let i = blocks.length - 1; i > 0; i--) {
-    const j = Math.floor(random() * (i + 1))
-    const tmp = blocks[i]
-    blocks[i] = blocks[j]
-    blocks[j] = tmp
+    const j = Math.floor(random() * (i + 1));
+    const tmp = blocks[i];
+    blocks[i] = blocks[j];
+    blocks[j] = tmp;
   }
 
-  // Flatten
-  const result = []
+  // Flatten back into a single contiguous array.
+  const result = [];
   for (const block of blocks) {
     for (const item of block) {
-      result.push(item)
+      result.push(item);
     }
   }
 
-  return result
+  return result;
 }
 
 /**
- * Floyd's reservoir sampling for random sampling without replacement.
- * More efficient than Set-based collision detection.
+ * Floyd's Algorithm R reservoir sampler.
+ *
+ * Streams over the input producing a uniformly random sample of size `n`
+ * **without replacement**. Equivalent to `shuffle(array).slice(0, n)` but
+ * uses only `O(n)` auxiliary memory and a single pass through `array`,
+ * which matters when sampling from very large arrays (e.g. millions of
+ * increments).
+ *
+ * Edge cases:
+ * - `n >= array.length`: returns a shuffled full copy of `array`.
+ * - `n &lt;= 0`: returns an empty array.
+ *
  * @param {Array&lt;*>} array Input array.
  * @param {number} n Number of elements to sample.
- * @return {Array&lt;*>} Random sample.
+ * @return {Array&lt;*>} Random sample of size `min(n, array.length)`.
  */
-export function randomSample (array, n) {
-  const len = array.length
-  if (n >= len) return shuffle(array)
-  if (n &lt;= 0) return []
+export function randomSample(array, n) {
+  const len = array.length;
+  if (n >= len) return shuffle(array);
+  if (n &lt;= 0) return [];
 
-  // Use Floyd's algorithm for reservoir sampling
-  const result = array.slice(0, n)
+  // Algorithm R: seed the reservoir with the first n elements, then for
+  // each later index `i` swap it (with probability `n / (i + 1)`) into a
+  // uniformly chosen reservoir slot.
+  const result = array.slice(0, n);
 
   for (let i = n; i &lt; len; i++) {
-    const j = Math.floor(random() * (i + 1))
+    const j = Math.floor(random() * (i + 1));
     if (j &lt; n) {
-      result[j] = array[i]
+      result[j] = array[i];
     }
   }
 
-  return result
+  return result;
 }
 </code></pre>
         </article>
@@ -285,13 +364,13 @@ export function randomSample (array, n) {
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mPRE">mPRE</a></li><li><a href="global.html#mPREExact">mPREExact</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Sun Jul 12 2026 16:21:25 GMT+0530 (India Standard Time)
 </footer>
 
 <script> prettyPrint(); </script>

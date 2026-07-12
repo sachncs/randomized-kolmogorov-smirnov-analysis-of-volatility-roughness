@@ -27,56 +27,106 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * Asymptotic statistical inference for RK-SAVR.
+ * @fileoverview Asymptotic-variance-based inference for RK-SAVR.
+ *
+ * Implements the standard-error and confidence-interval calculations that
+ * flow from **Proposition 2.9** in the RK-SAVR paper. The asymptotic
+ * variance formula
+ *
+ *     Var(H_hat) = (2 * pi * e) / (ln a2/a1)^2 * (1/sqrt(n) + 1/sqrt(m))^2
+ *
+ * assumes an i.i.d. (after block-permutation) sample and Gaussian tails,
+ * and is exact up to lower-order terms. As a consequence:
+ *
+ * - The estimator is consistent at rate `O(1/sqrt(n) + 1/sqrt(m))`.
+ * - Doubling the sample sizes halves the asymptotic standard error.
+ * - Widening the scale ratio `a2/a1` shrinks the variance quadratically.
+ *
+ * For guidance on when the asymptotic approximation is appropriate, see
+ * the paper's discussion around Proposition 2.9.
  */
 
-import { normalQuantile } from './math.js'
+import {normalQuantile} from './math.js';
 
 /**
- * Computes asymptotic variance based on Proposition 2.9.
- * Var(H_hat) = (2 * pi * e) / (ln(a))^2 * (1/sqrt(n) + 1/sqrt(m))^2
- * @param {number} scaleA1 Lower scale.
- * @param {number} scaleA2 Upper scale.
- * @param {number} n Sample size 1.
- * @param {number} m Sample size 2.
- * @return {number} Asymptotic variance.
+ * Asymptotic variance of the RK-SAVR estimator.
+ *
+ * Implements
+ *
+ *     Var(H_hat) = (2 * pi * e) / (ln(a2/a1))^2 * (1/sqrt(n) + 1/sqrt(m))^2.
+ *
+ * When `a1 == a2` (log ratio zero) the variance is degenerate and the
+ * function returns `Infinity` rather than dividing by zero; callers that
+ * intend to compute a SE/CI should reject equal scales up-front.
+ *
+ * @param {number} scaleA1 Lower scale `a_1`.
+ * @param {number} scaleA2 Upper scale `a_2`.
+ * @param {number} n Sample size at `a_1`.
+ * @param {number} m Sample size at `a_2`.
+ * @return {number} Non-negative asymptotic variance (`Infinity` if the
+ *   scales coincide).
  */
-export function asymptoticVariance (scaleA1, scaleA2, n, m) {
-  const lnA = Math.log(scaleA2 / scaleA1)
-  if (lnA === 0) return Infinity
-  return (2 * Math.PI * Math.E) / (lnA ** 2) * (1 / Math.sqrt(n) + 1 / Math.sqrt(m)) ** 2
+export function asymptoticVariance(scaleA1, scaleA2, n, m) {
+  const lnA = Math.log(scaleA2 / scaleA1);
+  if (lnA === 0) return Infinity;
+  return (
+    ((2 * Math.PI * Math.E) / lnA ** 2) *
+    (1 / Math.sqrt(n) + 1 / Math.sqrt(m)) ** 2
+  );
 }
 
 /**
- * Computes standard error of H estimate.
- * @param {number} scaleA1 Lower scale.
- * @param {number} scaleA2 Upper scale.
- * @param {number} n Sample size 1.
- * @param {number} m Sample size 2.
- * @return {number} Standard error.
+ * Asymptotic standard error: square root of the asymptotic variance.
+ *
+ * Thin convenience wrapper. The standard error has units of "Hurst" and
+ * can be read against the `hMin`/`hMax` bounds the estimator was
+ * configured with.
+ *
+ * @param {number} scaleA1 Lower scale `a_1`.
+ * @param {number} scaleA2 Upper scale `a_2`.
+ * @param {number} n Sample size at `a_1`.
+ * @param {number} m Sample size at `a_2`.
+ * @return {number} Non-negative standard error (`Infinity` for degenerate
+ *   scale choices).
  */
-export function standardError (scaleA1, scaleA2, n, m) {
-  return Math.sqrt(asymptoticVariance(scaleA1, scaleA2, n, m))
+export function standardError(scaleA1, scaleA2, n, m) {
+  return Math.sqrt(asymptoticVariance(scaleA1, scaleA2, n, m));
 }
 
 /**
- * Constructs confidence interval for H.
- * Uses the asymptotic normality result from Prop 2.9.
- * @param {number} HEstimate Point estimate.
- * @param {number} scaleA1 Lower scale.
- * @param {number} scaleA2 Upper scale.
- * @param {number} n Sample size 1.
- * @param {number} m Sample size 2.
- * @param {number} alpha Significance level (default 0.05).
- * @return {{lower: number, upper: number}} Confidence interval.
+ * Two-sided asymptotic confidence interval for `H`.
+ *
+ * Combines the asymptotic standard error with the standard-normal
+ * critical value `z_{1 - alpha/2}` (computed by the internal
+ * `normalQuantile`) to produce
+ *
+ *     CI = H_hat +/- z * SE.
+ *
+ * Note: this CI is **not** clipped to `[0, 1]`. For practical reporting
+ * users may want to clamp to `[hMin, hMax]`.
+ *
+ * @param {number} hEstimate Point estimate of `H`.
+ * @param {number} scaleA1 Lower scale `a_1`.
+ * @param {number} scaleA2 Upper scale `a_2`.
+ * @param {number} n Sample size at `a_1`.
+ * @param {number} m Sample size at `a_2`.
+ * @param {number} alpha Significance level (default `0.05`).
+ * @return {{lower: number, upper: number}} Confidence interval bounds.
  */
-export function confidenceInterval (HEstimate, scaleA1, scaleA2, n, m, alpha = 0.05) {
-  const se = standardError(scaleA1, scaleA2, n, m)
-  const zCrit = normalQuantile(1 - alpha / 2)
+export function confidenceInterval(
+  hEstimate,
+  scaleA1,
+  scaleA2,
+  n,
+  m,
+  alpha = 0.05,
+) {
+  const se = standardError(scaleA1, scaleA2, n, m);
+  const zCrit = normalQuantile(1 - alpha / 2);
   return {
-    lower: HEstimate - zCrit * se,
-    upper: HEstimate + zCrit * se
-  }
+    lower: hEstimate - zCrit * se,
+    upper: hEstimate + zCrit * se,
+  };
 }
 </code></pre>
         </article>
@@ -88,13 +138,13 @@ export function confidenceInterval (HEstimate, scaleA1, scaleA2, n, m, alpha = 0
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mPRE">mPRE</a></li><li><a href="global.html#mPREExact">mPREExact</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Sun Jul 12 2026 16:21:25 GMT+0530 (India Standard Time)
 </footer>
 
 <script> prettyPrint(); </script>

@@ -27,128 +27,165 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * Rough Bergomi (rBergomi) model implementation.
- * Two-factor rough volatility model with async coupling.
+ * @fileoverview Rough Bergomi (rBergomi) simulator.
  *
- * Reference: Bayer, Friz, Gatheral (2016)
- * "Roughing it up: Connecting rough volatility with option pricing"
+ * ## Model
  *
- * The model:
- *   dV_t = eta * V_t * dW_t^perp
- *   I_t = integral_0^t K(t-s) dW_s^perp
- *   V_t = xi_t * exp(eta * I_t - (eta^2/2) * t^{2H})
- *   where K(t) = sqrt(2H) * t^{H-0.5} for H in (0, 0.5]
+ * The variance process follows
  *
- * Google JS Style Guide compliant.
+ *     dV_t / V_t = eta * dW_t^perp
+ *     I_t        = ∫_0^t sqrt(2H) * (t - s)^{H - 0.5} dW_s^perp
+ *     V_t        = xi * exp(eta * I_t - (eta^2 / 2) * t^{2H})
+ *
+ * where `W^perp` is a Brownian motion correlated with the price Brownian
+ * `W` via `dW_t * dW_t^perp = rho dt`. The kernel `K(t) = sqrt(2H) *
+ * t^{H - 0.5}` is the Riemann-Liouville fractional kernel of order
+ * `H - 0.5 &lt; 0` for `0 &lt; H &lt;= 0.5`.
+ *
+ * Implementation strategy:
+ *
+ * 1. Draw `nPaths` pairs of correlated standard normals once via
+ *    {@link correlatedGaussian}.
+ * 2. For each path, precompute the fractional kernel and accumulate the
+ *    running fractional integral `I_t` time-step by time-step via
+ *    {@link fractionalIntegral}.
+ * 3. Apply the exponential-of-linear formula to obtain the variance path;
+ *    the negative `(eta^2 / 2) * t^{2H}` term corrects the drift.
+ *
+ * Path generation is `O(nPaths * nSteps^2)` due to the cumulative kernel
+ * convolution. For very long paths switch to a circulant-embedding FFT
+ * approximation (not implemented here).
+ *
+ * @see Bayer, C., Friz, P., Gatheral, J. (2016). Pricing under rough
+ *   volatility. *Quantitative Finance* 16(6), 887-884.
+ * @see ../random.js for the stochastic primitives used here.
  */
 
 import {
   correlatedGaussian,
   fractionalKernel,
-  fractionalIntegral
-} from '../random.js'
+  fractionalIntegral,
+} from '../random.js';
 
 /**
- * Generates rough Bergomi volatility paths.
- * The variance process follows:
- *   V_t = xi * exp(eta * I_t - (eta^2/2) * t^{2H})
- * where I_t is the Riemann-Liouville fractional integral of W^perp.
+ * Generates `nPaths` rBergomi volatility paths.
+ *
+ * Returns both the variance paths and the time grid. The Brownian
+ * increments are also retained in the `brownians` field so that
+ * {@link rBergomiPrice} can drive a price SDE with the same noise
+ * realization.
  *
  * @param {Object} params Model parameters.
- * @param {number} params.nPaths Number of simulation paths.
- * @param {number} params.nSteps Number of time steps.
- * @param {number} params.xi Initial volatility level (xi_0).
- * @param {number} params.eta Volatility of volatility.
- * @param {number} params.rho Correlation between Brownian motions (-1 to 1).
- * @param {number} params.h Hurst parameter (0 &lt; H &lt;= 0.5 for rough).
- * @param {number} params.T Terminal time.
- * @return {{paths: Array&lt;Float64Array>, times: Array&lt;number>}}
+ * @param {number=} params.nPaths Number of simulation paths (default `1`).
+ * @param {number=} params.nSteps Number of time steps (default `252`).
+ * @param {number=} params.xi Initial variance level `xi` (default `0.04`).
+ * @param {number=} params.eta Volatility-of-volatility (default `2.0`).
+ * @param {number=} params.rho Correlation between price and volatility
+ *   Brownian motions (default `-0.8`).
+ * @param {number=} params.h Hurst parameter; should satisfy
+ *   `0 &lt; H &lt;= 0.5` for the rough regime (default `0.1`).
+ * @param {number=} params.T Terminal time (default `1.0`).
+ * @return {{paths: Array&lt;Float64Array>, times: Array&lt;number>, brownians:
+ *   Array&lt;Float64Array>}} Simulated variance paths, time grid, and the
+ *   underlying Brownian increments for downstream use.
  */
-export function rBergomi (params = {}) {
-  const nPaths = params.nPaths || 1
-  const nSteps = params.nSteps || 252
-  const xi = params.xi || 0.04
-  const eta = params.eta || 2.0
-  const rho = params.rho !== undefined ? params.rho : -0.8
-  const H = params.h || 0.1
-  const T = params.T || 1.0
-  const dt = T / nSteps
+export function rBergomi(params = {}) {
+  const nPaths = params.nPaths || 1;
+  const nSteps = params.nSteps || 252;
+  const xi = params.xi || 0.04;
+  const eta = params.eta || 2.0;
+  const rho = params.rho !== undefined ? params.rho : -0.8;
+  const H = params.h || 0.1;
+  const T = params.T || 1.0;
+  const dt = T / nSteps;
 
   // Precompute the fractional kernel K(t) = sqrt(2H) * t^{H-0.5}
-  const kernel = fractionalKernel(H, nSteps, dt)
+  const kernel = fractionalKernel(H, nSteps, dt);
 
-  const times = new Array(nSteps + 1)
-  times[0] = 0
+  const times = new Array(nSteps + 1);
+  times[0] = 0;
   for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt
+    times[t] = t * dt;
   }
 
   // Precompute the drift adjustment factor
-  const driftFactor = (eta * eta / 2) * Math.pow(dt, 2 * H)
+  const driftFactor = ((eta * eta) / 2) * Math.pow(dt, 2 * H);
 
-  const paths = []
-  const brownians = []
+  const paths = [];
+  const brownians = [];
 
   for (let p = 0; p &lt; nPaths; p++) {
-    const path = new Float64Array(nSteps + 1)
-    path[0] = xi
+    const path = new Float64Array(nSteps + 1);
+    path[0] = xi;
 
     // Generate correlated Brownian increments
-    const [dW, dWperp] = correlatedGaussian(nSteps, rho)
+    const [dW, dWperp] = correlatedGaussian(nSteps, rho);
 
     // Precompute squared increments for efficiency
-    const dWsqrt = new Float64Array(nSteps)
-    const dWperpsqrt = new Float64Array(nSteps)
+    const dWsqrt = new Float64Array(nSteps);
+    const dWperpsqrt = new Float64Array(nSteps);
     for (let t = 0; t &lt; nSteps; t++) {
-      dWsqrt[t] = dW[t] * Math.sqrt(dt)
-      dWperpsqrt[t] = dWperp[t] * Math.sqrt(dt)
+      dWsqrt[t] = dW[t] * Math.sqrt(dt);
+      dWperpsqrt[t] = dWperp[t] * Math.sqrt(dt);
     }
 
     // Compute the fractional integral I_t = sum_{j=0}^{t-1} K(t-j) * dW_perp_j
-    const I = new Float64Array(nSteps + 1)
-    I[0] = 0
+    const I = new Float64Array(nSteps + 1);
+    I[0] = 0;
 
     for (let t = 1; t &lt;= nSteps; t++) {
-      I[t] = fractionalIntegral(dWperp, kernel, t)
+      I[t] = fractionalIntegral(dWperp, kernel, t);
     }
 
     // Compute variance process
     for (let t = 1; t &lt;= nSteps; t++) {
-      const It = I[t]
-      const Vt = xi * Math.exp(eta * It - driftFactor * Math.pow(t * dt, 2 * H))
-      path[t] = Math.max(0, Vt)
+      const It = I[t];
+      const Vt =
+        xi * Math.exp(eta * It - driftFactor * Math.pow(t * dt, 2 * H));
+      path[t] = Math.max(0, Vt);
     }
 
-    paths.push(path)
-    brownians.push(dW)
+    paths.push(path);
+    brownians.push(dW);
   }
 
-  return { paths, times, brownians }
+  return {paths, times, brownians};
 }
 
 /**
- * Generates log-price paths under rough volatility.
- * SDE: dS_t = vol_t * S_t * dW_t
- * where vol_t = sqrt(V_t) from rBergomi.
+ * Generates log-price (or price) paths under rBergomi variance.
  *
- * @param {Object} params Model parameters.
- * @param {number} params.nPaths Number of paths.
- * @param {number} params.nSteps Number of time steps.
- * @param {number} params.mu Drift (default 0 for martingale).
- * @param {number} params.s0 Initial price (default 100).
- * @param {number} params.xi Initial volatility.
- * @param {number} params.eta Vol of vol.
- * @param {number} params.rho Correlation.
- * @param {number} params.h Hurst parameter.
- * @param {number} params.T Terminal time.
- * @return {{prices: Array&lt;Float64Array>, volatilities: Array&lt;Float64Array>, times: Array&lt;number>}}
+ * Given a previously simulated variance path `V_t` from
+ * {@link rBergomi}, the price SDE
+ *
+ *     dS_t / S_t = exp(V_t^{0.5}) * dW_t + mu dt
+ *
+ * is integrated in log form (so that the price cannot drift below zero)
+ * using the same Brownian realization that was used to build the
+ * variance path.
+ *
+ * @param {Object} params Model parameters. Inherits every rBergomi
+ *   parameter from {@link rBergomi} (`xi`, `eta`, `rho`, `h`, `T`) and
+ *   adds the price-specific ones below.
+ * @param {number=} params.nPaths Number of paths (default `1`).
+ * @param {number=} params.nSteps Number of time steps (default `252`).
+ * @param {number=} params.mu Drift (default `0`, martingale).
+ * @param {number=} params.s0 Initial price (default `100`).
+ * @param {number=} params.xi Initial variance (default `0.04`).
+ * @param {number=} params.eta Vol-of-vol (default `2.0`).
+ * @param {number=} params.rho Correlation (default `-0.8`).
+ * @param {number=} params.h Hurst (default `0.1`).
+ * @param {number=} params.T Terminal time (default `1.0`).
+ * @return {{prices: Array&lt;Float64Array>, volatilities:
+ *   Array&lt;Float64Array>, times: Array&lt;number>}} Simulated price paths,
+ *   their variance paths, and the shared time grid.
  */
-export function rBergomiPrice (params = {}) {
-  const nPaths = params.nPaths || 1
-  const nSteps = params.nSteps || 252
-  const mu = params.mu || 0
-  const s0 = params.s0 || 100
-  const T = params.T || 1.0
+export function rBergomiPrice(params = {}) {
+  const nPaths = params.nPaths || 1;
+  const nSteps = params.nSteps || 252;
+  const mu = params.mu || 0;
+  const s0 = params.s0 || 100;
+  const T = params.T || 1.0;
 
   const volResult = rBergomi({
     nPaths,
@@ -157,38 +194,38 @@ export function rBergomiPrice (params = {}) {
     eta: params.eta,
     rho: params.rho,
     h: params.h,
-    T
-  })
+    T,
+  });
 
-  const paths = volResult.paths
-  const times = volResult.times
-  const brownians = volResult.brownians
-  const dt = T / nSteps
+  const paths = volResult.paths;
+  const times = volResult.times;
+  const brownians = volResult.brownians;
+  const dt = T / nSteps;
 
-  const prices = []
-  const volatilities = []
+  const prices = [];
+  const volatilities = [];
 
   for (let p = 0; p &lt; nPaths; p++) {
-    const volPath = paths[p]
-    const dW = brownians[p]
-    const pricePath = new Float64Array(nSteps + 1)
-    pricePath[0] = s0
+    const volPath = paths[p];
+    const dW = brownians[p];
+    const pricePath = new Float64Array(nSteps + 1);
+    pricePath[0] = s0;
 
     for (let t = 0; t &lt; nSteps; t++) {
-      const vol = Math.sqrt(volPath[t + 1])
-      const dWsqrt = dW[t] * Math.sqrt(dt)
-      pricePath[t + 1] = pricePath[t] * Math.exp(mu * dt + vol * dWsqrt)
+      const vol = Math.sqrt(volPath[t + 1]);
+      const dWsqrt = dW[t] * Math.sqrt(dt);
+      pricePath[t + 1] = pricePath[t] * Math.exp(mu * dt + vol * dWsqrt);
     }
 
-    prices.push(pricePath)
-    volatilities.push(volPath)
+    prices.push(pricePath);
+    volatilities.push(volPath);
   }
 
   return {
     prices,
     volatilities,
-    times
-  }
+    times,
+  };
 }
 </code></pre>
         </article>
@@ -200,13 +237,13 @@ export function rBergomiPrice (params = {}) {
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mPRE">mPRE</a></li><li><a href="global.html#mPREExact">mPREExact</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Sun Jul 12 2026 16:21:25 GMT+0530 (India Standard Time)
 </footer>
 
 <script> prettyPrint(); </script>

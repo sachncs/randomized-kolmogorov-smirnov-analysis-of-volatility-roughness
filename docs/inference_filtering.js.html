@@ -27,128 +27,190 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * Filtering utilities for RK-SAVR.
+ * @fileoverview Filtering utilities for H(t) series.
+ *
+ * Provides:
+ *
+ * - `kalmanFilter`: a one-dimensional Kalman filter that smooths a series
+ *   of `H` estimates under a simple random-walk state-space model.
+ * - `constancyTest`: a likelihood-ratio test of whether `H` is constant
+ *   over time (`q = 0`) against the alternative that it varies (`q > 0`).
+ *
+ * The state-space model assumed throughout is
+ *
+ *     x_t = x_{t-1} + w_t,  w_t ~ N(0, q)
+ *     z_t = x_t + v_t,      v_t ~ N(0, r)
+ *
+ * where `x_t` is the latent Hurst exponent at time `t` and `z_t` is the
+ * estimated value. The process-noise variance `q` and the observation-
+ * noise variance `r` are user-specified.
  */
 
 /**
- * Kalman filter for state-space modeling of H(t).
- * Simple 1D Kalman filter for tracking H over time.
- * State: x_t = H_t (Hurst parameter)
- * Transition: H_t = H_{t-1} + w_t, w_t ~ N(0, q)
- * Observation: z_t = H_t + v_t, v_t ~ N(0, r)
- * @param {Array&lt;number>} observations Array of H estimates.
+ * One-dimensional Kalman filter for H(t) smoothing.
+ *
+ * State: `x_t = H_t`. Transition: `H_t = H_{t-1} + w_t`, `w_t ~ N(0, q)`.
+ * Observation: `z_t = H_t + v_t`, `v_t ~ N(0, r)`.
+ *
+ * The filter is seeded with the first observation (`x_0 = z_0`) and a
+ * unit prior covariance. Each subsequent step performs:
+ *
+ * 1. **Predict:** `xPred = x`, `pPred = p + q`.
+ * 2. **Update:** `K = pPred / (pPred + r)`, `x = xPred + K * (z - xPred)`,
+ *    `p = (1 - K) * pPred`.
+ *
+ * The result captures both the one-step-ahead predictions (before
+ * incorporating the observation) and the filtered states (after).
+ *
+ * @param {Array&lt;number>} observations Time-ordered `H` estimates.
  * @param {Object} opts Filter options.
- * @param {number} opts.q Process noise variance.
- * @param {number} opts.r Measurement noise variance.
- * @return {{filtered: Array&lt;number>, predictions: Array&lt;number>}} Filtered and predicted states.
+ * @param {number=} opts.q Process noise variance (default `0.01`).
+ * @param {number=} opts.r Measurement noise variance (default `0.1`).
+ * @return {{filtered: Array&lt;number>, predictions: Array&lt;number>}}
+ *   Filtered and one-step-predicted states, each of length `n`.
  */
-export function kalmanFilter (observations, opts = {}) {
-  const q = opts.q || 0.01
-  const r = opts.r || 0.1
+export function kalmanFilter(observations, opts = {}) {
+  const q = opts.q || 0.01;
+  const r = opts.r || 0.1;
 
-  const n = observations.length
-  const filtered = new Array(n)
-  const predictions = new Array(n)
+  const n = observations.length;
+  const filtered = new Array(n);
+  const predictions = new Array(n);
 
-  let x = observations[0]
-  let p = 1.0
+  let x = observations[0];
+  let p = 1.0;
 
   for (let i = 0; i &lt; n; i++) {
     if (i > 0) {
-      const xPred = x
-      const pPred = p + q
-      predictions[i] = xPred
+      const xPred = x;
+      const pPred = p + q;
+      predictions[i] = xPred;
 
-      const z = observations[i]
-      const k = pPred / (pPred + r)
-      x = xPred + k * (z - xPred)
-      p = (1 - k) * pPred
+      const z = observations[i];
+      const k = pPred / (pPred + r);
+      x = xPred + k * (z - xPred);
+      p = (1 - k) * pPred;
     } else {
-      predictions[i] = x
+      predictions[i] = x;
     }
-    filtered[i] = x
+    filtered[i] = x;
   }
 
-  return { filtered, predictions }
+  return {filtered, predictions};
 }
 
 /**
- * Constancy test for H(t) using likelihood ratio on Kalman filter process noise.
- * Tests H0: q = 0 (constant H) vs H1: q > 0 (time-varying H).
+ * Constancy test for `H(t)` based on a Kalman-filter likelihood ratio.
  *
- * @param {Array&lt;number>} observations Array of H estimates.
+ * Tests the null hypothesis `H0: q = 0` (constant Hurst exponent) against
+ * the alternative `H1: q > 0` (time-varying). Both branches run the same
+ * 1D Kalman filter; the test statistic is the likelihood-ratio
+ *
+ *     LR = 2 * (ll(q = q1) - ll(q = 0))
+ *
+ * which, under `H0`, is asymptotically `chi-squared` with one degree of
+ * freedom. The p-value is computed via the standard survival-function
+ * identity `P(chi2_1 > x) = 2 * (1 - Phi(sqrt(x)))`.
+ *
+ * Notes:
+ *
+ * - The constant-vs-time-varying decision uses a fixed `alpha = 0.05`
+ *   cut-off on `pValue`.
+ * - The test is most powerful when `n` is large and `q1` is well-chosen;
+ *   in practice, sweep over a grid of `q1` values for robustness.
+ *
+ * @param {Array&lt;number>} observations Time-ordered `H` estimates.
  * @param {Object} opts Filter options.
- * @param {number} opts.q Process noise variance under H1.
- * @param {number} opts.r Measurement noise variance.
- * @return {{lrStat: number, pValue: number, constant: boolean}} Test result.
+ * @param {number=} opts.q Process-noise variance under `H1` (default
+ *   `0.01`).
+ * @param {number=} opts.r Measurement-noise variance (default `0.1`).
+ * @return {{lrStat: number, pValue: number, constant: boolean}} Test
+ *   bundle; `constant = true` when the null is **not** rejected at the
+ *   5% level.
  */
-export function constancyTest (observations, opts = {}) {
-  const q1 = opts.q || 0.01
-  const r = opts.r || 0.1
+export function constancyTest(observations, opts = {}) {
+  const q1 = opts.q || 0.01;
+  const r = opts.r || 0.1;
 
   // Log-likelihood under q > 0 (time-varying)
-  const ll1 = _kalmanLogLikelihood(observations, q1, r)
+  const ll1 = _kalmanLogLikelihood(observations, q1, r);
 
   // Log-likelihood under q = 0 (constant)
-  const ll0 = _kalmanLogLikelihood(observations, 0, r)
+  const ll0 = _kalmanLogLikelihood(observations, 0, r);
 
-  const lrStat = 2 * (ll1 - ll0)
+  const lrStat = 2 * (ll1 - ll0);
   // Under H0, LR ~ chi-square(1)
   // p-value using approximation: P(chi2_1 > x) = 2 * (1 - Phi(sqrt(x)))
-  const pValue = 2 * (1 - _normalCdf(Math.sqrt(Math.max(0, lrStat))))
-  const constant = pValue > 0.05
+  const pValue = 2 * (1 - _normalCdf(Math.sqrt(Math.max(0, lrStat))));
+  const constant = pValue > 0.05;
 
-  return { lrStat, pValue, constant }
+  return {lrStat, pValue, constant};
 }
 
 /**
- * Computes log-likelihood of observations under a 1D Kalman filter.
+ * Log-likelihood of the observations under a 1D Kalman filter.
+ *
+ * Each time-step contributes `log N(innovation; 0, pPred + r)` to the
+ * total log-likelihood. For `t = 0` there is no innovation, so we log the
+ * marginal density of `z_0` under `N(x_0, r)`.
+ *
  * @private
- * @param {Array&lt;number>} observations
- * @param {number} q
- * @param {number} r
- * @return {number}
+ * @param {Array&lt;number>} observations Time-ordered `H` estimates.
+ * @param {number} q Process-noise variance.
+ * @param {number} r Measurement-noise variance.
+ * @return {number} Total log-likelihood (or `-Infinity` for empty input).
  */
-function _kalmanLogLikelihood (observations, q, r) {
-  const n = observations.length
-  if (n === 0) return -Infinity
+function _kalmanLogLikelihood(observations, q, r) {
+  const n = observations.length;
+  if (n === 0) return -Infinity;
 
-  let x = observations[0]
-  let p = 1.0
-  let logLikelihood = 0
+  let x = observations[0];
+  let p = 1.0;
+  let logLikelihood = 0;
 
   for (let i = 0; i &lt; n; i++) {
     if (i > 0) {
-      const xPred = x
-      const pPred = p + q
-      const z = observations[i]
-      const innovation = z - xPred
-      const innovationVar = pPred + r
-      logLikelihood += -0.5 * (Math.log(2 * Math.PI * innovationVar) + (innovation * innovation) / innovationVar)
-      const k = pPred / innovationVar
-      x = xPred + k * innovation
-      p = (1 - k) * pPred
+      const xPred = x;
+      const pPred = p + q;
+      const z = observations[i];
+      const innovation = z - xPred;
+      const innovationVar = pPred + r;
+      logLikelihood +=
+        -0.5 *
+        (Math.log(2 * Math.PI * innovationVar) +
+          (innovation * innovation) / innovationVar);
+      const k = pPred / innovationVar;
+      x = xPred + k * innovation;
+      p = (1 - k) * pPred;
     } else {
-      logLikelihood += -0.5 * Math.log(2 * Math.PI * r)
+      logLikelihood += -0.5 * Math.log(2 * Math.PI * r);
     }
   }
 
-  return logLikelihood
+  return logLikelihood;
 }
 
 /**
- * Standard normal CDF approximation.
+ * Standard normal CDF via the Abramowitz &amp; Stegun rational
+ * approximation. Error is bounded at `~7.5e-8` over the whole real line.
+ *
  * @private
- * @param {number} x
- * @return {number}
+ * @param {number} x Input value (any real number).
+ * @return {number} `P(Z &lt;= x)` for `Z ~ N(0, 1)`, in `[0, 1]`.
  */
-function _normalCdf (x) {
-  // Abramowitz and Stegun approximation
-  const sign = x &lt; 0 ? -1 : 1
-  const ax = Math.abs(x) / Math.sqrt(2)
-  const t = 1 / (1 + 0.3275911 * ax)
-  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-ax * ax)
-  return 0.5 * (1 + sign * y)
+function _normalCdf(x) {
+  // Abramowitz and Stegun 7.1.26 — accurate to ~7.5e-8.
+  const sign = x &lt; 0 ? -1 : 1;
+  const ax = Math.abs(x) / Math.sqrt(2);
+  const t = 1 / (1 + 0.3275911 * ax);
+  const y =
+    1 -
+    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) *
+      t +
+      0.254829592) *
+      t *
+      Math.exp(-ax * ax);
+  return 0.5 * (1 + sign * y);
 }
 </code></pre>
         </article>
@@ -160,13 +222,13 @@ function _normalCdf (x) {
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mPRE">mPRE</a></li><li><a href="global.html#mPREExact">mPREExact</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Sun Jul 12 2026 16:21:25 GMT+0530 (India Standard Time)
 </footer>
 
 <script> prettyPrint(); </script>

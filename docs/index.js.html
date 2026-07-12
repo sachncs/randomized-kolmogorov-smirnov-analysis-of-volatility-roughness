@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>JSDoc: Source: models/fou.js</title>
+    <title>JSDoc: Source: index.js</title>
 
     <script src="scripts/prettify/prettify.js"> </script>
     <script src="scripts/prettify/lang-css.js"> </script>
@@ -17,7 +17,7 @@
 
 <div id="main">
 
-    <h1 class="page-title">Source: models/fou.js</h1>
+    <h1 class="page-title">Source: index.js</h1>
 
     
 
@@ -27,176 +27,139 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * @fileoverview Fractional Ornstein-Uhlenbeck (fOU) simulator.
+ * @fileoverview Public entry point for the rksavr package.
  *
- * Mean-reverting process driven by fractional Brownian motion:
+ * This module re-exports every user-facing API of the RK-SAVR library. It is
+ * the only file consumers should normally import from when using the package
+ * (`import {RKSAVR} from 'rksavr';`). The intent is to keep a stable surface
+ * even when internal modules are split, renamed, or rearranged.
  *
- *     dX_t = theta * (mu - X_t) dt + sigma * dB^H_t
+ * ## Architecture
  *
- * where `B^H` is fractional Brownian motion with Hurst parameter `H`.
+ * The library follows a layered, single-responsibility design:
  *
- * - For `H = 0.5` the driver reduces to ordinary Brownian motion and
- *   the simulator switches to an exact discretization (the Vasicek
- *   recursion).
- * - For `H != 0.5` we fall back to Euler-Maruyama using a pre-generated
- *   fGN sample; this introduces `O(sqrt(dt))` bias but is adequate for
- *   path generation at the typical sample sizes used here.
+ *   lib/
+ *   ├── index.js                 &lt;- this file, the public surface
+ *   ├── rksavr.js                &lt;- RKSAVR class (the estimator)
+ *   ├── stats.js                 &lt;- KS distance, permutation, sampling
+ *   ├── random.js                &lt;- fBm/fGn generation, Box-Muller, kernels
+ *   ├── prng.js                  &lt;- Seedable mulberry32 PRNG + global handle
+ *   ├── logger.js                &lt;- Minimal leveled logger
+ *   ├── inference.js             &lt;- High-level inference facade
+ *   ├── inference/asymptotic.js  &lt;- Asymptotic variance, CIs
+ *   ├── inference/filtering.js   &lt;- Kalman filter, constancy test
+ *   ├── inference/math.js        &lt;- Internal normal-quantile approximation
+ *   ├── optimization/            &lt;- Brent, Nelder-Mead, SA, DE, AGS, registry
+ *   ├── models/                  &lt;- Rough volatility simulators + forecasters
+ *   └── data/                    &lt;- Loaders, preprocessing, noise correction
  *
- * The `exactOU` companion uses a fully consistent fractional integral
- * discretization that is more accurate but `O(n^2)` per path.
+ * The RK-SAVR estimator itself depends only on `stats.js`,
+ * `optimization/index.js`, and `logger.js`. Inference, models, and the data
+ * pipeline are independent consumers that may be used standalone.
+ *
+ * ## Design rationale
+ *
+ * - **Zero runtime dependencies.** Everything is implemented in pure ES2022+
+ *   JavaScript so the library is portable across Node.js, browsers, and the
+ *   bundled IIFE/CJS/ESM distributions.
+ * - **Seeded, deterministic PRNG.** `setSeed`/`random` in `prng.js` lets users
+ *   make simulations reproducible. Math.random() is used as a fallback.
+ * - **Pluggable optimizers.** Estimators delegate the 1D minimization problem
+ *   to factories registered in `optimization/registry.js`. Callers can plug
+ *   in custom optimizers at runtime.
+ *
+ * @see {@link RKSAVR} for the main estimator class.
+ * @see {@link module:stats} for the statistical primitives.
+ * @see {@link module:optimization} for the optimizer registry.
+ * @see ./rksavr.js
+ * @see ./stats.js
+ * @see ./inference.js
+ * @see ./models/index.js
+ * @see ./optimization/index.js
  */
 
-import {generateFGN, randn} from '../random.js';
+export {RKSAVR} from './rksavr.js';
+export {ksDistance, shuffle, randomSample, blockPermutation} from './stats.js';
+export {
+  generateFGN,
+  generateFBM,
+  randn,
+  randnBatch,
+  correlatedGaussian,
+  fractionalKernel,
+  fractionalIntegral,
+} from './random.js';
+export {setSeed, resetSeed, random} from './prng.js';
+export {
+  LogLevel,
+  setLogLevel,
+  getLogLevel,
+  debug,
+  info,
+  warn,
+  error,
+} from './logger.js';
+export {
+  asymptoticVariance,
+  standardError,
+  confidenceInterval,
+  kalmanFilter,
+  ksCriticalValue,
+  ksPvalue,
+  significanceTest,
+  cusumTest,
+  detectBreakpoints,
+  constancyTest,
+  bootstrapCI,
+} from './inference.js';
+export {
+  rBergomi,
+  rBergomiPrice,
+  rFSV,
+  rFSVPrice,
+  fOU,
+  exactOU,
+  mPRE,
+  mPREExact,
+  arfima,
+  holtWintersForecast,
+  createLSTM,
+  createAttentionModel,
+  getModel,
+  registerModel,
+  listModels,
+} from './models/index.js';
 
-/**
- * Simulates an fOU path using Euler-Maruyama (or exact Vasicek when
- * `H = 0.5`).
- *
- * The exact Vasicek recursion for `H = 0.5` is
- *
- *     X_{t+1} = mu + (X_t - mu) * exp(-theta * dt)
- *                      + sigma * sqrt((1 - exp(-2 theta dt)) / (2 theta))
- *                        * Z_{t+1}
- *
- * which avoids the bias introduced by naive EM for the standard OU
- * process.
- *
- * @param {Object} params Model parameters.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
- */
-export function fOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
-
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
-  }
-
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
-
-  if (H === 0.5) {
-    // Exact discretization for standard OU
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
-    }
-  } else {
-    // Euler-Maruyama for fractional OU
-    // Generate fractional Gaussian noise
-    const fGn = generateFGN(nSteps, H);
-    const sqrtDt = Math.sqrt(dt);
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-      const diffusion = sigma * fGn[t - 1] * sqrtDt;
-      path[t] = path[t - 1] + drift + diffusion;
-    }
-  }
-
-  return {path, times};
-}
-
-/**
- * "Exact" Riemann-Liouville fractional-integral fOU simulator.
- *
- * Replaces the Euler-Maruyama diffusion of {@link fOU} with an exact
- * Riemann-Liouville integral of the Brownian increments against a
- * precomputed kernel
- *
- *     K(i) = sqrt(2H) * (i * dt)^{H - 0.5}
- *
- * Path update becomes
- *
- *     X_{t+1} = X_t + theta * (mu - X_t) * dt + sigma * sqrt(dt) * I_{t+1}
- *     I_{t+1} = sum_{j &lt;= t} K(t - j) * dW_j
- *
- * The integral is `O(t)` per step and the entire path is `O(n^2)` in
- * `nSteps`, so this is reserved for short series or experiments that
- * need to isolate discretization error.
- *
- * @param {Object} params Same shape as {@link fOU}.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
- */
-export function exactOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
-
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
-  }
-
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
-
-  if (H === 0.5) {
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
-    }
-  } else {
-    // Precompute kernel for fractional integral
-    const kernel = new Float64Array(nSteps);
-    const coeff = Math.sqrt(2 * H);
-    for (let i = 0; i &lt; nSteps; i++) {
-      const t = (i + 1) * dt;
-      kernel[i] = coeff * Math.pow(t, H - 0.5);
-    }
-
-    // Generate fBM increments
-    const fGn = generateFGN(nSteps, H);
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-
-      // Fractional integral: sum_{j=0}^{t-1} K(t-j) * dW_j
-      let fracInt = 0;
-      for (let j = 0; j &lt; t; j++) {
-        fracInt += kernel[t - 1 - j] * fGn[j];
-      }
-      fracInt *= Math.sqrt(dt);
-
-      path[t] = path[t - 1] + drift + sigma * fracInt;
-    }
-  }
-
-  return {path, times};
-}
+export {
+  parseCSV,
+  extractSeries,
+  parseJSON,
+  validateNoGaps,
+  downsample,
+  computeRV,
+  computeRVParkinson,
+  aggregateDailyRV,
+  logTransform,
+  centerSeries,
+  standardizeSeries,
+  preprocessPipeline,
+  trainTestSplit,
+  createWindows,
+  generateVIXLogVol,
+  generateSPXLogVol,
+  generateIntradayPrices,
+  seriesToCSV,
+} from './data/index.js';
+export {
+  brentMinimize,
+  nelderMead,
+  simulatedAnnealing,
+  differentialEvolution,
+  adaptiveGridSearch,
+  safeOptimizer,
+  getOptimizerFactory,
+  registerOptimizerFactory,
+} from './optimization/index.js';
 </code></pre>
         </article>
     </section>

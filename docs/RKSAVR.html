@@ -30,9 +30,40 @@
     
         <h2><span class="attribs"><span class="type-signature"></span></span>RKSAVR<span class="signature">(config)</span><span class="type-signature"></span></h2>
         
-            <div class="class-description">RK-SAVR Estimator class.
-Estimates Hurst parameter (H) for rough volatility models.
-H must satisfy 0 < H < 1.</div>
+            <div class="class-description">Randomized Kolmogorov-Smirnov Analysis of Volatility Roughness estimator.
+
+The class encapsulates a *configurable* estimator instance: the scales to
+analyze, the sampler used inside each variance-reduction iteration, the
+1D optimizer that minimizes the KS distance surface, and the safe bounds
+the final estimate will be clamped to.
+
+Lifecycle:
+  1. The constructor stores the configuration and pulls a fresh optimizer
+     function from optimization/registry. The estimator is
+     therefore stateful across calls — each call to <a href="RKSAVR.html#estimate">RKSAVR#estimate</a>
+     draws a new independent PRNG state via `prng.js`.
+  2. <a href="RKSAVR.html#estimate">RKSAVR#estimate</a> averages `iterations` independent
+     <a href="RKSAVR.html#estimateSingle">RKSAVR#estimateSingle</a> results for variance reduction.
+  3. <a href="RKSAVR.html#rolling">RKSAVR#rolling</a> and <a href="RKSAVR.html#rollingMultiScale">RKSAVR#rollingMultiScale</a> are
+     convenience wrappers around a sliding window of these estimates.
+  4. <a href="RKSAVR.html#estimateBatch">RKSAVR#estimateBatch</a> performs non-overlapping window
+     estimation for parallel processing pipelines.
+
+Thread-safety: the estimator does not share mutable state between its
+methods (no internal counters) but it does rely on the *global* seeded
+PRNG exposed by prng. Callers that need concurrent estimation
+should serialize the calls (e.g. wrap in an async queue) or seed the
+PRNG with a per-call seed.
+
+Example:
+
+```javascript
+import {RKSAVR} from 'rksavr';
+
+const estimator = new RKSAVR({scaleA1: 1, scaleA2: 50,
+                              sampleSize: 500, iterations: 16});
+const H = estimator.estimate(logVolSeriesWindow);
+```</div>
         
     
 </header>
@@ -53,6 +84,15 @@ H must satisfy 0 < H < 1.</div>
     
 
 
+
+<div class="description">
+    Builds an RKSAVR estimator with the given configuration.
+
+All parameters are optional; sensible defaults match the paper's
+recommended settings for daily equity log-volatility. Pass an explicit
+`iterations: 1` to disable variance reduction and a non-null
+`blockSize` to enable paper-faithful block random permutation.
+</div>
 
 
 
@@ -155,7 +195,7 @@ H must satisfy 0 < H < 1.</div>
 
             
 
-            <td class="description last">Lower scale (default 1).</td>
+            <td class="description last">Lower scale `a_1` used when `scales` is not provided (default 1).</td>
         </tr>
 
     
@@ -186,7 +226,7 @@ H must satisfy 0 < H < 1.</div>
 
             
 
-            <td class="description last">Upper scale (default 50).</td>
+            <td class="description last">Upper scale `a_2` used when `scales` is not provided (default 50).</td>
         </tr>
 
     
@@ -219,7 +259,7 @@ H must satisfy 0 < H < 1.</div>
 
             
 
-            <td class="description last">Array of scale values for multi-scale analysis.</td>
+            <td class="description last">Multi-scale analysis array; overrides `scaleA1`/`scaleA2`.</td>
         </tr>
 
     
@@ -250,7 +290,7 @@ H must satisfy 0 < H < 1.</div>
 
             
 
-            <td class="description last">Sample size per scale (default 500).</td>
+            <td class="description last">Number of increments drawn per scale (default 500).</td>
         </tr>
 
     
@@ -281,7 +321,7 @@ H must satisfy 0 < H < 1.</div>
 
             
 
-            <td class="description last">Number of variance-reduction iterations (default 16).</td>
+            <td class="description last">Variance-reduction iterations averaged by `estimate()` (default 16).</td>
         </tr>
 
     
@@ -303,8 +343,6 @@ H must satisfy 0 < H < 1.</div>
             
                 <td class="attributes">
                 
-                    &lt;optional><br>
-                
 
                 
 
@@ -314,7 +352,7 @@ H must satisfy 0 < H < 1.</div>
 
             
 
-            <td class="description last">Custom sampler function.</td>
+            <td class="description last">Custom sampler `(data, n) => sample`. Defaults to Floyd's reservoir sampler.</td>
         </tr>
 
     
@@ -347,7 +385,7 @@ H must satisfy 0 < H < 1.</div>
 
             
 
-            <td class="description last">Scale weights for weighted estimation.</td>
+            <td class="description last">Per-scale weights used by the multi-scale weighted objective.</td>
         </tr>
 
     
@@ -378,7 +416,7 @@ H must satisfy 0 < H < 1.</div>
 
             
 
-            <td class="description last">Optimizer: 'brent', 'nelder-mead', 'annealing', 'de', 'ags' (default 'brent').</td>
+            <td class="description last">Key from the optimizer registry: `'brent' | 'nelder-mead' | 'annealing' | 'de' | 'ags'`. Defaults to `'brent'`.</td>
         </tr>
 
     
@@ -411,7 +449,7 @@ H must satisfy 0 < H < 1.</div>
 
             
 
-            <td class="description last">Block size for block random permutation (default null, uses point-wise sampling).</td>
+            <td class="description last">Block length for block random permutation. `null`/missing disables permutation and falls back to plain sampling.</td>
         </tr>
 
     
@@ -444,7 +482,7 @@ H must satisfy 0 < H < 1.</div>
 
             
 
-            <td class="description last">Lower bound for H estimate (default 0.01).</td>
+            <td class="description last">Lower bound clamp applied to the returned `H` (default 0.01).</td>
         </tr>
 
     
@@ -477,8 +515,7 @@ H must satisfy 0 < H < 1.</div>
 
             
 
-            <td class="description last">Upper bound for H estimate (default 0.99).
-The valid range for the estimated H is 0 < H < 1.</td>
+            <td class="description last">Upper bound clamp applied to the returned `H` (default 0.99).</td>
         </tr>
 
     
@@ -526,12 +563,21 @@ The valid range for the estimated H is 0 < H < 1.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line100">line 100</a>
+        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line229">line 229</a>
     </li></ul></dd>
     
 
     
 
+    
+    <dt class="tag-see">See:</dt>
+    <dd class="tag-see">
+        <ul>
+            <li>./stats.js</li>
+        
+            <li>./optimization/registry.js</li>
+        </ul>
+    </dd>
     
 
     
@@ -597,7 +643,12 @@ The valid range for the estimated H is 0 < H < 1.</td>
 
 
 <div class="description">
-    Estimate H with variance reduction.
+    Variance-reduced estimate: averages `iterations` independent
+single-shot estimates. Returns the mean of the successful iterations
+and logs the failed ones through the leveled logger.
+
+If every iteration fails (extremely unlikely for healthy inputs) the
+method throws so callers are not silently handed back `0` or `NaN`.
 </div>
 
 
@@ -672,7 +723,68 @@ The valid range for the estimated H is 0 < H < 1.</td>
 
             
 
-            <td class="description last">Options.</td>
+            <td class="description last">Per-call overrides (see constructor).
+                <h6>Properties</h6>
+                
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+        <th>Attributes</th>
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>iterations</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">number</span>
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+
+            <td class="description last">Override the configured `iterations`.</td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+            </td>
         </tr>
 
     
@@ -713,7 +825,7 @@ The valid range for the estimated H is 0 < H < 1.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line287">line 287</a>
+        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line488">line 488</a>
     </li></ul></dd>
     
 
@@ -736,13 +848,42 @@ The valid range for the estimated H is 0 < H < 1.</td>
 
 
 
+<h5>Throws:</h5>
+
+        
+
+<dl>
+    <dt>
+        <div class="param-desc">
+        When `iterations <= 0` or all iterations fail.
+        </div>
+    </dt>
+    <dd></dd>
+    <dt>
+        <dl>
+            <dt>
+                Type
+            </dt>
+            <dd>
+                
+<span class="param-type">Error</span>
+
+
+            </dd>
+        </dl>
+    </dt>
+    <dd></dd>
+</dl>
+
+
+    
 
 
 <h5>Returns:</h5>
 
         
 <div class="param-desc">
-    Averaged H estimate.
+    Mean of successful per-iteration estimates.
 </div>
 
 
@@ -771,7 +912,7 @@ The valid range for the estimated H is 0 < H < 1.</td>
     
 
     
-    <h4 class="name" id="estimateBatch"><span class="type-signature"></span>estimateBatch<span class="signature">(windows)</span><span class="type-signature"> &rarr; {Array.&lt;number>}</span></h4>
+    <h4 class="name" id="estimateBatch"><span class="type-signature"></span>estimateBatch<span class="signature">(windows)</span><span class="type-signature"> &rarr; {Array.&lt;{H: ?number, <a href="global.html#error">error</a>: ?string}>}</span></h4>
     
 
     
@@ -779,7 +920,14 @@ The valid range for the estimated H is 0 < H < 1.</td>
 
 
 <div class="description">
-    Batch estimation for parallel processing.
+    Batch estimation across an array of non-overlapping windows.
+
+Each window is processed independently via <a href="RKSAVR.html#estimateSingle">RKSAVR#estimateSingle</a>
+(no variance reduction — variance reduction is left to the caller for
+fine-grained control over per-window effort). Errors are captured into
+the returned objects instead of thrown, which makes this method the
+preferred entry point for parallel pipelines built on top of the
+library.
 </div>
 
 
@@ -872,7 +1020,7 @@ The valid range for the estimated H is 0 < H < 1.</td>
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line377">line 377</a>
+        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line624">line 624</a>
     </li></ul></dd>
     
 
@@ -901,7 +1049,8 @@ The valid range for the estimated H is 0 < H < 1.</td>
 
         
 <div class="param-desc">
-    Array of H estimates.
+    Per-window
+  estimates with an `error` field set when estimation failed.
 </div>
 
 
@@ -912,7 +1061,7 @@ The valid range for the estimated H is 0 < H < 1.</td>
     </dt>
     <dd>
         
-<span class="param-type">Array.&lt;number></span>
+<span class="param-type">Array.&lt;{H: ?number, <a href="global.html#error">error</a>: ?string}></span>
 
 
     </dd>
@@ -930,7 +1079,7 @@ The valid range for the estimated H is 0 < H < 1.</td>
     
 
     
-    <h4 class="name" id="estimateSingleWithDiagnostics"><span class="type-signature"></span>estimateSingleWithDiagnostics<span class="signature">(window, opts)</span><span class="type-signature"> &rarr; {Object}</span></h4>
+    <h4 class="name" id="estimateSingle"><span class="type-signature"></span>estimateSingle<span class="signature">(window, opts)</span><span class="type-signature"> &rarr; {number}</span></h4>
     
 
     
@@ -938,7 +1087,7 @@ The valid range for the estimated H is 0 < H < 1.</td>
 
 
 <div class="description">
-    Single estimation of H with diagnostics.
+    Single-shot `H` estimate (no variance reduction).
 </div>
 
 
@@ -1013,7 +1162,1471 @@ The valid range for the estimated H is 0 < H < 1.</td>
 
             
 
-            <td class="description last">Override options.</td>
+            <td class="description last">Per-call overrides (see constructor).</td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line454">line 454</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5>Throws:</h5>
+
+        
+
+<dl>
+    <dt>
+        <div class="param-desc">
+        When the window is empty or the optimizer fails.
+        </div>
+    </dt>
+    <dd></dd>
+    <dt>
+        <dl>
+            <dt>
+                Type
+            </dt>
+            <dd>
+                
+<span class="param-type">Error</span>
+
+
+            </dd>
+        </dl>
+    </dt>
+    <dd></dd>
+</dl>
+
+
+    
+
+
+<h5>Returns:</h5>
+
+        
+<div class="param-desc">
+    Estimated Hurst parameter in `[hMin, hMax]`.
+</div>
+
+
+
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">number</span>
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+
+
+        
+            
+
+    
+
+    
+    <h4 class="name" id="estimateSingleWithDiagnostics"><span class="type-signature"></span>estimateSingleWithDiagnostics<span class="signature">(window, opts)</span><span class="type-signature"> &rarr; {Object}</span></h4>
+    
+
+    
+
+
+
+<div class="description">
+    Single-shot `H` estimate that also reports the minimized KS distance.
+
+The minimized `D` is a useful proxy for goodness-of-fit: a small value
+means the rescaled samples are nearly identically distributed, which is
+exactly what we expect under the null of self-similarity at the true `H`.
+</div>
+
+
+
+
+
+
+
+
+
+    <h5>Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>window</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;number></span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">Data window.</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>opts</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">Per-call overrides (see constructor).</td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line469">line 469</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5>Returns:</h5>
+
+        
+<div class="param-desc">
+    Estimate and minimized KS distance.
+</div>
+
+
+
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Object</span>
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+
+
+        
+            
+
+    
+
+    
+    <h4 class="name" id="rolling"><span class="type-signature"></span>rolling<span class="signature">(series, windowSize, step, onProgress)</span><span class="type-signature"> &rarr; {Array.&lt;{t: number, H: ?number, <a href="global.html#error">error</a>: ?string}>}</span></h4>
+    
+
+    
+
+
+
+<div class="description">
+    Sliding-window estimation along a long series.
+
+For each anchor `t` the method slices `series[t : t + windowSize]`
+and runs `estimate()` on the slice. Failures are captured into the
+result as `{t, H: null, error}` instead of aborting the loop.
+
+Performance: each call to `estimate()` re-uses the configured
+variance-reduction iterations; consider shrinking `iterations` for
+monitoring workloads.
+</div>
+
+
+
+
+
+
+
+
+
+    <h5>Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+        <th>Default</th>
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>series</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;number></span>
+
+
+            
+            </td>
+
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last">Time series in chronological order.</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>windowSize</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">number</span>
+
+
+            
+            </td>
+
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last">Window length in samples.</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>step</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">number</span>
+
+
+            
+            </td>
+
+            
+
+            
+                <td class="default">
+                
+                    1
+                
+                </td>
+            
+
+            <td class="description last">Stride between consecutive windows (default 1).</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>onProgress</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">function</span>
+
+
+            
+            </td>
+
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last">Optional progress callback
+  receiving the ratio of completed windows in `[0, 1]`.</td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line530">line 530</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5>Throws:</h5>
+
+        
+
+<dl>
+    <dt>
+        <div class="param-desc">
+        When `step <= 0`.
+        </div>
+    </dt>
+    <dd></dd>
+    <dt>
+        <dl>
+            <dt>
+                Type
+            </dt>
+            <dd>
+                
+<span class="param-type">Error</span>
+
+
+            </dd>
+        </dl>
+    </dt>
+    <dd></dd>
+</dl>
+
+
+    
+
+
+<h5>Returns:</h5>
+
+        
+<div class="param-desc">
+    Rolling
+  estimates. Empty when the series is shorter than the window.
+</div>
+
+
+
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Array.&lt;{t: number, H: ?number, <a href="global.html#error">error</a>: ?string}></span>
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+
+
+        
+            
+
+    
+
+    
+    <h4 class="name" id="rollingMultiScale"><span class="type-signature"></span>rollingMultiScale<span class="signature">(series, windowSize, scales, weights<span class="signature-attributes">opt</span>, step, onProgress)</span><span class="type-signature"> &rarr; {Array.&lt;{t: number, H: ?number, profile: Array.&lt;number>, <a href="global.html#error">error</a>: ?string}>}</span></h4>
+    
+
+    
+
+
+
+<div class="description">
+    Multi-scale rolling estimation that exposes the KS profile per window.
+
+For each anchor `t` the method performs a **one-shot** multi-scale
+estimate (no variance reduction — this method favors throughput over
+stability) and additionally returns the flat `profile` of pairwise KS
+distances at the optimal `H`. The profile is a
+`|scales| * (|scales| - 1) / 2` array suitable for diagnostic plotting.
+</div>
+
+
+
+
+
+
+
+
+
+    <h5>Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+        <th>Attributes</th>
+        
+
+        
+        <th>Default</th>
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>series</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;number></span>
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last">Time series in chronological order.</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>windowSize</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">number</span>
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last">Window length in samples.</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>scales</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;number></span>
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last">Multi-scale analysis array used for both
+  estimation and profile computation.</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>weights</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;number></span>
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    null
+                
+                </td>
+            
+
+            <td class="description last">Optional per-scale weights for the
+  weighted KS objective.</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>step</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">number</span>
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    1
+                
+                </td>
+            
+
+            <td class="description last">Stride between consecutive windows (default 1).</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>onProgress</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">function</span>
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last">Optional progress callback.</td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line578">line 578</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5>Throws:</h5>
+
+        
+
+<dl>
+    <dt>
+        <div class="param-desc">
+        When `step <= 0`.
+        </div>
+    </dt>
+    <dd></dd>
+    <dt>
+        <dl>
+            <dt>
+                Type
+            </dt>
+            <dd>
+                
+<span class="param-type">Error</span>
+
+
+            </dd>
+        </dl>
+    </dt>
+    <dd></dd>
+</dl>
+
+
+    
+
+
+<h5>Returns:</h5>
+
+        
+<div class="param-desc">
+    Rolling estimates with KS profiles. Empty when the
+  series is shorter than the window.
+</div>
+
+
+
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Array.&lt;{t: number, H: ?number, profile: Array.&lt;number>, <a href="global.html#error">error</a>: ?string}></span>
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+
+
+        
+            
+
+    
+
+    
+    <h4 class="name" id=".getIncrements"><span class="type-signature">(static) </span>getIncrements<span class="signature">(series, scale)</span><span class="type-signature"> &rarr; {Float64Array}</span></h4>
+    
+
+    
+
+
+
+<div class="description">
+    Computes the increments of a series at a single scale.
+
+For each index `i` returns `series[i + scale] - series[i]`. The result
+has length `series.length - scale`. Inputs may be a regular array or a
+`Float64Array`. The implementation is allocation-friendly: the output
+is always a `Float64Array`.
+
+Complexity: O(n).
+</div>
+
+
+
+
+
+
+
+
+
+    <h5>Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>series</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;number></span>
+|
+
+<span class="param-type">Float64Array</span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">Input series in chronological order.</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>scale</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">number</span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">Non-negative lag `a > 0`.</td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line311">line 311</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5>Returns:</h5>
+
+        
+<div class="param-desc">
+    Increment array of length `series.length - scale`.
+</div>
+
+
+
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Float64Array</span>
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+
+
+        
+            
+
+    
+
+    
+    <h4 class="name" id=".getIncrementsMulti"><span class="type-signature">(static) </span>getIncrementsMulti<span class="signature">(series, scales)</span><span class="type-signature"> &rarr; {Map.&lt;number, Float64Array>}</span></h4>
+    
+
+    
+
+
+
+<div class="description">
+    Precomputes the increments for **every requested scale** in a single
+logical pass. Each scale's increment array is independent so callers can
+keep them cached for sliding-window applications.
+
+Note: the current implementation loops once per scale because the
+inner index depends on the scale itself; the constant factor is small.
+Complexity: O(|scales| * n).
+</div>
+
+
+
+
+
+
+
+
+
+    <h5>Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>series</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;number></span>
+|
+
+<span class="param-type">Float64Array</span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">Input series.</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>scales</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;number></span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">Scales to compute increments at.</td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line333">line 333</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5>Returns:</h5>
+
+        
+<div class="param-desc">
+    Map from scale to its increment array.
+</div>
+
+
+
+<dl>
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Map.&lt;number, Float64Array></span>
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+
+
+        
+            
+
+    
+
+    
+    <h4 class="name" id=".registerOptimizer"><span class="type-signature">(static) </span>registerOptimizer<span class="signature">(name, factory)</span><span class="type-signature"></span></h4>
+    
+
+    
+
+
+
+<div class="description">
+    Registers a custom optimizer factory in the global registry. Useful for
+plugging in proprietary or experimental optimizers without modifying
+the library source.
+</div>
+
+
+
+
+
+
+
+
+
+    <h5>Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>name</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">string</span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">Optimizer identifier (used as `config.optimizerType`).</td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>factory</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">function</span>
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last">A function returning the
+  optimized function `(f, hMin, hMax, [hInit]) => H`.</td>
         </tr>
 
     
@@ -1079,1110 +2692,6 @@ The valid range for the estimated H is 0 < H < 1.</td>
 
 
 
-<h5>Returns:</h5>
-
-        
-<div class="param-desc">
-    Estimated H and minimized KS distance.
-</div>
-
-
-
-<dl>
-    <dt>
-        Type
-    </dt>
-    <dd>
-        
-<span class="param-type">Object</span>
-
-
-    </dd>
-</dl>
-
-    
-
-
-
-
-
-        
-            
-
-    
-
-    
-    <h4 class="name" id="rolling"><span class="type-signature"></span>rolling<span class="signature">(series, windowSize, step, onProgress)</span><span class="type-signature"> &rarr; {Array.&lt;{t: number, H: number}>}</span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Rolling estimation with progress callback.
-</div>
-
-
-
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-        <th>Default</th>
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>series</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">Array.&lt;number></span>
-
-
-            
-            </td>
-
-            
-
-            
-                <td class="default">
-                
-                </td>
-            
-
-            <td class="description last">Time series data.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>windowSize</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">number</span>
-
-
-            
-            </td>
-
-            
-
-            
-                <td class="default">
-                
-                </td>
-            
-
-            <td class="description last">Window size.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>step</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">number</span>
-
-
-            
-            </td>
-
-            
-
-            
-                <td class="default">
-                
-                    1
-                
-                </td>
-            
-
-            <td class="description last">Step size.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>onProgress</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">function</span>
-
-
-            
-            </td>
-
-            
-
-            
-                <td class="default">
-                
-                </td>
-            
-
-            <td class="description last">Progress callback.</td>
-        </tr>
-
-    
-    </tbody>
-</table>
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line314">line 314</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-<h5>Returns:</h5>
-
-        
-<div class="param-desc">
-    Rolling estimates.
-</div>
-
-
-
-<dl>
-    <dt>
-        Type
-    </dt>
-    <dd>
-        
-<span class="param-type">Array.&lt;{t: number, H: number}></span>
-
-
-    </dd>
-</dl>
-
-    
-
-
-
-
-
-        
-            
-
-    
-
-    
-    <h4 class="name" id="rollingMultiScale"><span class="type-signature"></span>rollingMultiScale<span class="signature">(series, windowSize, scales, weights, step, onProgress)</span><span class="type-signature"> &rarr; {Array.&lt;{t: number, H: number, profile: Array.&lt;number>}>}</span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Multi-scale rolling estimation.
-</div>
-
-
-
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-        <th>Default</th>
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>series</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">Array.&lt;number></span>
-
-
-            
-            </td>
-
-            
-
-            
-                <td class="default">
-                
-                </td>
-            
-
-            <td class="description last">Time series data.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>windowSize</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">number</span>
-
-
-            
-            </td>
-
-            
-
-            
-                <td class="default">
-                
-                </td>
-            
-
-            <td class="description last">Window size.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>scales</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">Array.&lt;number></span>
-
-
-            
-            </td>
-
-            
-
-            
-                <td class="default">
-                
-                </td>
-            
-
-            <td class="description last">Array of scales.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>weights</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">Array.&lt;number></span>
-
-
-            
-            </td>
-
-            
-
-            
-                <td class="default">
-                
-                    null
-                
-                </td>
-            
-
-            <td class="description last">Optional weights for each scale.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>step</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">number</span>
-
-
-            
-            </td>
-
-            
-
-            
-                <td class="default">
-                
-                    1
-                
-                </td>
-            
-
-            <td class="description last">Step size.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>onProgress</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">function</span>
-
-
-            
-            </td>
-
-            
-
-            
-                <td class="default">
-                
-                </td>
-            
-
-            <td class="description last">Progress callback.</td>
-        </tr>
-
-    
-    </tbody>
-</table>
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line347">line 347</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-<h5>Returns:</h5>
-
-        
-<div class="param-desc">
-    Rolling estimates.
-</div>
-
-
-
-<dl>
-    <dt>
-        Type
-    </dt>
-    <dd>
-        
-<span class="param-type">Array.&lt;{t: number, H: number, profile: Array.&lt;number>}></span>
-
-
-    </dd>
-</dl>
-
-    
-
-
-
-
-
-        
-            
-
-    
-
-    
-    <h4 class="name" id=".getIncrements"><span class="type-signature">(static) </span>getIncrements<span class="signature">(series, scale)</span><span class="type-signature"> &rarr; {Float64Array}</span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Computes increments for a series at given scale.
-</div>
-
-
-
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>series</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">Array.&lt;number></span>
-|
-
-<span class="param-type">Float64Array</span>
-
-
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Input series.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>scale</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">number</span>
-
-
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Scale value.</td>
-        </tr>
-
-    
-    </tbody>
-</table>
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line158">line 158</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-<h5>Returns:</h5>
-
-        
-<div class="param-desc">
-    Increment array.
-</div>
-
-
-
-<dl>
-    <dt>
-        Type
-    </dt>
-    <dd>
-        
-<span class="param-type">Float64Array</span>
-
-
-    </dd>
-</dl>
-
-    
-
-
-
-
-
-        
-            
-
-    
-
-    
-    <h4 class="name" id=".getIncrementsMulti"><span class="type-signature">(static) </span>getIncrementsMulti<span class="signature">(series, scales)</span><span class="type-signature"> &rarr; {Map.&lt;number, Float64Array>}</span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Precomputes all increments for a set of scales in a single pass.
-</div>
-
-
-
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>series</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">Array.&lt;number></span>
-|
-
-<span class="param-type">Float64Array</span>
-
-
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Input series.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>scales</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">Array.&lt;number></span>
-
-
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Array of scale values.</td>
-        </tr>
-
-    
-    </tbody>
-</table>
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line173">line 173</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-<h5>Returns:</h5>
-
-        
-<div class="param-desc">
-    Map from scale to increment array.
-</div>
-
-
-
-<dl>
-    <dt>
-        Type
-    </dt>
-    <dd>
-        
-<span class="param-type">Map.&lt;number, Float64Array></span>
-
-
-    </dd>
-</dl>
-
-    
-
-
-
-
-
-        
-            
-
-    
-
-    
-    <h4 class="name" id=".registerOptimizer"><span class="type-signature">(static) </span>registerOptimizer<span class="signature">(name, factory)</span><span class="type-signature"></span></h4>
-    
-
-    
-
-
-
-<div class="description">
-    Registers a custom optimizer in the global registry.
-</div>
-
-
-
-
-
-
-
-
-
-    <h5>Parameters:</h5>
-    
-
-<table class="params">
-    <thead>
-    <tr>
-        
-        <th>Name</th>
-        
-
-        <th>Type</th>
-
-        
-
-        
-
-        <th class="last">Description</th>
-    </tr>
-    </thead>
-
-    <tbody>
-    
-
-        <tr>
-            
-                <td class="name"><code>name</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">string</span>
-
-
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Optimizer identifier.</td>
-        </tr>
-
-    
-
-        <tr>
-            
-                <td class="name"><code>factory</code></td>
-            
-
-            <td class="type">
-            
-                
-<span class="param-type">function</span>
-
-
-            
-            </td>
-
-            
-
-            
-
-            <td class="description last">Returns the optimizer function.</td>
-        </tr>
-
-    
-    </tbody>
-</table>
-
-
-
-
-
-
-<dl class="details">
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-
-    
-    <dt class="tag-source">Source:</dt>
-    <dd class="tag-source"><ul class="dummy"><li>
-        <a href="rksavr.js.html">rksavr.js</a>, <a href="rksavr.js.html#line137">line 137</a>
-    </li></ul></dd>
-    
-
-    
-
-    
-
-    
-</dl>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -2204,13 +2713,13 @@ The valid range for the estimated H is 0 < H < 1.</td>
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#MODEL_REGISTRY">MODEL_REGISTRY</a></li><li><a href="global.html#_binomialCache">_binomialCache</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mpre">mpre</a></li><li><a href="global.html#mpreExact">mpreExact</a></li><li><a href="global.html#mulberry32">mulberry32</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seededRng">seededRng</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="RKSAVR.html">RKSAVR</a></li></ul><h3>Global</h3><ul><li><a href="global.html#LogLevel">LogLevel</a></li><li><a href="global.html#adaptiveGridSearch">adaptiveGridSearch</a></li><li><a href="global.html#aggregateDailyRV">aggregateDailyRV</a></li><li><a href="global.html#arfima">arfima</a></li><li><a href="global.html#asymptoticVariance">asymptoticVariance</a></li><li><a href="global.html#blockPermutation">blockPermutation</a></li><li><a href="global.html#bootstrapCI">bootstrapCI</a></li><li><a href="global.html#brentMinimize">brentMinimize</a></li><li><a href="global.html#buildScaleProfile">buildScaleProfile</a></li><li><a href="global.html#centerSeries">centerSeries</a></li><li><a href="global.html#computeRV">computeRV</a></li><li><a href="global.html#computeRVParkinson">computeRVParkinson</a></li><li><a href="global.html#computeScalePairDistance">computeScalePairDistance</a></li><li><a href="global.html#confidenceInterval">confidenceInterval</a></li><li><a href="global.html#constancyTest">constancyTest</a></li><li><a href="global.html#correlatedGaussian">correlatedGaussian</a></li><li><a href="global.html#createAttentionModel">createAttentionModel</a></li><li><a href="global.html#createLSTM">createLSTM</a></li><li><a href="global.html#createWindows">createWindows</a></li><li><a href="global.html#cusumTest">cusumTest</a></li><li><a href="global.html#debug">debug</a></li><li><a href="global.html#defaultSampler">defaultSampler</a></li><li><a href="global.html#detectBreakpoints">detectBreakpoints</a></li><li><a href="global.html#differentialEvolution">differentialEvolution</a></li><li><a href="global.html#downsample">downsample</a></li><li><a href="global.html#error">error</a></li><li><a href="global.html#exactOU">exactOU</a></li><li><a href="global.html#extractSeries">extractSeries</a></li><li><a href="global.html#fOU">fOU</a></li><li><a href="global.html#fractionalIntegral">fractionalIntegral</a></li><li><a href="global.html#fractionalKernel">fractionalKernel</a></li><li><a href="global.html#generateFBM">generateFBM</a></li><li><a href="global.html#generateFGN">generateFGN</a></li><li><a href="global.html#generateIntradayPrices">generateIntradayPrices</a></li><li><a href="global.html#generateSPXLogVol">generateSPXLogVol</a></li><li><a href="global.html#generateVIXLogVol">generateVIXLogVol</a></li><li><a href="global.html#getLogLevel">getLogLevel</a></li><li><a href="global.html#getModel">getModel</a></li><li><a href="global.html#getOptimizerFactory">getOptimizerFactory</a></li><li><a href="global.html#holtWintersForecast">holtWintersForecast</a></li><li><a href="global.html#info">info</a></li><li><a href="global.html#kalmanFilter">kalmanFilter</a></li><li><a href="global.html#ksCriticalValue">ksCriticalValue</a></li><li><a href="global.html#ksDistance">ksDistance</a></li><li><a href="global.html#ksDistanceRescaled">ksDistanceRescaled</a></li><li><a href="global.html#ksPvalue">ksPvalue</a></li><li><a href="global.html#listModels">listModels</a></li><li><a href="global.html#logTransform">logTransform</a></li><li><a href="global.html#logVolDebias">logVolDebias</a></li><li><a href="global.html#mPRE">mPRE</a></li><li><a href="global.html#mPREExact">mPREExact</a></li><li><a href="global.html#nelderMead">nelderMead</a></li><li><a href="global.html#normalQuantile">normalQuantile</a></li><li><a href="global.html#parseCSV">parseCSV</a></li><li><a href="global.html#parseJSON">parseJSON</a></li><li><a href="global.html#preavgReturns">preavgReturns</a></li><li><a href="global.html#preprocessPipeline">preprocessPipeline</a></li><li><a href="global.html#rBergomi">rBergomi</a></li><li><a href="global.html#rBergomiPrice">rBergomiPrice</a></li><li><a href="global.html#rFSV">rFSV</a></li><li><a href="global.html#rFSVPrice">rFSVPrice</a></li><li><a href="global.html#randn">randn</a></li><li><a href="global.html#randnBatch">randnBatch</a></li><li><a href="global.html#random">random</a></li><li><a href="global.html#randomSample">randomSample</a></li><li><a href="global.html#realizedKernel">realizedKernel</a></li><li><a href="global.html#registerModel">registerModel</a></li><li><a href="global.html#registerOptimizerFactory">registerOptimizerFactory</a></li><li><a href="global.html#resetSeed">resetSeed</a></li><li><a href="global.html#safeOptimizer">safeOptimizer</a></li><li><a href="global.html#seriesToCSV">seriesToCSV</a></li><li><a href="global.html#setLogLevel">setLogLevel</a></li><li><a href="global.html#setSeed">setSeed</a></li><li><a href="global.html#shuffle">shuffle</a></li><li><a href="global.html#significanceTest">significanceTest</a></li><li><a href="global.html#simulatedAnnealing">simulatedAnnealing</a></li><li><a href="global.html#standardError">standardError</a></li><li><a href="global.html#standardizeSeries">standardizeSeries</a></li><li><a href="global.html#trainTestSplit">trainTestSplit</a></li><li><a href="global.html#validateNoGaps">validateNoGaps</a></li><li><a href="global.html#vectorizedKsObjective">vectorizedKsObjective</a></li><li><a href="global.html#warn">warn</a></li><li><a href="global.html#weightedKsObjective">weightedKsObjective</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed May 13 2026 01:15:52 GMT+0530 (India Standard Time)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Sun Jul 12 2026 16:21:25 GMT+0530 (India Standard Time)
 </footer>
 
 <script> prettyPrint(); </script>

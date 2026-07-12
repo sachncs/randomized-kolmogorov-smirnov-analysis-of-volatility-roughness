@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>JSDoc: Source: models/fou.js</title>
+    <title>JSDoc: Source: optimization/differentialEvolution.js</title>
 
     <script src="scripts/prettify/prettify.js"> </script>
     <script src="scripts/prettify/lang-css.js"> </script>
@@ -17,7 +17,7 @@
 
 <div id="main">
 
-    <h1 class="page-title">Source: models/fou.js</h1>
+    <h1 class="page-title">Source: optimization/differentialEvolution.js</h1>
 
     
 
@@ -27,175 +27,124 @@
     <section>
         <article>
             <pre class="prettyprint source linenums"><code>/**
- * @fileoverview Fractional Ornstein-Uhlenbeck (fOU) simulator.
+ * @fileoverview Differential evolution global optimizer.
  *
- * Mean-reverting process driven by fractional Brownian motion:
+ * Differential evolution (Storn &amp; Price, 1997) maintains a population of
+ * candidate solutions and produces each new generation by taking a
+ * *trial vector* from three randomly chosen other members
  *
- *     dX_t = theta * (mu - X_t) dt + sigma * dB^H_t
+ *     v_i = a + fScale * (b - c)
  *
- * where `B^H` is fractional Brownian motion with Hurst parameter `H`.
+ * and crossing it with the current member using a per-coordinate
+ * Bernoulli crossover with probability `cr`. The trial replaces the
+ * current member when it scores better. Method strengths:
  *
- * - For `H = 0.5` the driver reduces to ordinary Brownian motion and
- *   the simulator switches to an exact discretization (the Vasicek
- *   recursion).
- * - For `H != 0.5` we fall back to Euler-Maruyama using a pre-generated
- *   fGN sample; this introduces `O(sqrt(dt))` bias but is adequate for
- *   path generation at the typical sample sizes used here.
+ * - Parallelizable: each candidate can be evaluated independently.
+ * - Self-adapting: no gradient required.
+ * - Robust on multimodal objectives.
  *
- * The `exactOU` companion uses a fully consistent fractional integral
- * discretization that is more accurate but `O(n^2)` per path.
+ * The implementation uses the canonical `rand / 1 / bin` strategy and
+ * clamps trials to `[lb, ub]`.
  */
 
-import {generateFGN, randn} from '../random.js';
+import {shuffle} from '../stats.js';
+import {random} from '../prng.js';
 
 /**
- * Simulates an fOU path using Euler-Maruyama (or exact Vasicek when
- * `H = 0.5`).
+ * Differential-evolution minimization over an arbitrary-dimensional
+ * space.
  *
- * The exact Vasicek recursion for `H = 0.5` is
+ * The initial population is drawn uniformly inside `[lb, ub]`. Each
+ * member produces one trial per generation; the trial survives to the
+ * next generation only when its objective is strictly better.
  *
- *     X_{t+1} = mu + (X_t - mu) * exp(-theta * dt)
- *                      + sigma * sqrt((1 - exp(-2 theta dt)) / (2 theta))
- *                        * Z_{t+1}
- *
- * which avoids the bias introduced by naive EM for the standard OU
- * process.
- *
- * @param {Object} params Model parameters.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
+ * @param {function(Array&lt;number>): number} f Objective function.
+ * @param {Array&lt;number>} x0 Initial guess; used only to size the search
+ *   space and the lower-bound default (`x0[i]` is ignored otherwise).
+ * @param {Object} opts Algorithm options.
+ * @param {number=} opts.maxIter Maximum generations (default `500`).
+ * @param {number=} opts.popSize Population size (default `max(20, 10 *
+ *   dim)`).
+ * @param {number=} opts.cr Crossover probability (default `0.7`).
+ * @param {number=} opts.f Differential scale factor `F` (default `0.8`).
+ * @param {Array&lt;number>=} opts.lb Per-dimension lower bounds (default
+ *   `-5` for every dimension).
+ * @param {Array&lt;number>=} opts.ub Per-dimension upper bounds (default
+ *   `5` for every dimension).
+ * @return {{x: Array&lt;number>, f: number}} Best point found and its
+ *   objective value.
  */
-export function fOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
+export function differentialEvolution(f, x0, opts = {}) {
+  const maxIter = opts.maxIter || 500;
+  const popSize = opts.popSize || Math.max(20, 10 * x0.length);
+  const cr = opts.cr || 0.7;
+  const fScale = opts.f || 0.8;
+  const lb = opts.lb || x0.map(() => -5);
+  const ub = opts.ub || x0.map(() => 5);
 
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
+  const dim = x0.length;
+  const population = [];
+  for (let i = 0; i &lt; popSize; i++) {
+    population.push(x0.map((val, j) => lb[j] + random() * (ub[j] - lb[j])));
   }
 
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
-
-  if (H === 0.5) {
-    // Exact discretization for standard OU
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
-    }
-  } else {
-    // Euler-Maruyama for fractional OU
-    // Generate fractional Gaussian noise
-    const fGn = generateFGN(nSteps, H);
-    const sqrtDt = Math.sqrt(dt);
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-      const diffusion = sigma * fGn[t - 1] * sqrtDt;
-      path[t] = path[t - 1] + drift + diffusion;
+  const fVals = new Float64Array(popSize);
+  for (let i = 0; i &lt; popSize; i++) {
+    fVals[i] = f(population[i]);
+  }
+  let bestIdx = 0;
+  let bestValue = fVals[0];
+  for (let i = 1; i &lt; popSize; i++) {
+    if (fVals[i] &lt; bestValue) {
+      bestValue = fVals[i];
+      bestIdx = i;
     }
   }
 
-  return {path, times};
-}
-
-/**
- * "Exact" Riemann-Liouville fractional-integral fOU simulator.
- *
- * Replaces the Euler-Maruyama diffusion of {@link fOU} with an exact
- * Riemann-Liouville integral of the Brownian increments against a
- * precomputed kernel
- *
- *     K(i) = sqrt(2H) * (i * dt)^{H - 0.5}
- *
- * Path update becomes
- *
- *     X_{t+1} = X_t + theta * (mu - X_t) * dt + sigma * sqrt(dt) * I_{t+1}
- *     I_{t+1} = sum_{j &lt;= t} K(t - j) * dW_j
- *
- * The integral is `O(t)` per step and the entire path is `O(n^2)` in
- * `nSteps`, so this is reserved for short series or experiments that
- * need to isolate discretization error.
- *
- * @param {Object} params Same shape as {@link fOU}.
- * @param {number=} params.nSteps Number of time steps (default `252`).
- * @param {number=} params.T Terminal time (default `1.0`).
- * @param {number=} params.theta Mean-reversion speed (default `1.0`).
- * @param {number=} params.mu Long-term mean (default `0.0`).
- * @param {number=} params.sigma Diffusion scale (default `1.0`).
- * @param {number=} params.h Hurst parameter (default `0.5`).
- * @param {number=} params.x0 Initial value (default `0.0`).
- * @return {{path: Float64Array, times: Array&lt;number>}} Simulated path
- *   and time grid.
- */
-export function exactOU(params = {}) {
-  const nSteps = params.nSteps || 252;
-  const T = params.T || 1.0;
-  const dt = T / nSteps;
-  const theta = params.theta || 1.0;
-  const mu = params.mu || 0.0;
-  const sigma = params.sigma || 1.0;
-  const H = params.h !== undefined ? params.h : 0.5;
-  const x0 = params.x0 || 0.0;
-
-  const times = new Array(nSteps + 1);
-  times[0] = 0;
-  for (let t = 1; t &lt;= nSteps; t++) {
-    times[t] = t * dt;
-  }
-
-  const path = new Float64Array(nSteps + 1);
-  path[0] = x0;
-
-  if (H === 0.5) {
-    const decay = Math.exp(-theta * dt);
-    const normConst = sigma * Math.sqrt((1 - decay * decay) / (2 * theta));
-    for (let t = 1; t &lt;= nSteps; t++) {
-      path[t] = mu + (path[t - 1] - mu) * decay + normConst * randn();
-    }
-  } else {
-    // Precompute kernel for fractional integral
-    const kernel = new Float64Array(nSteps);
-    const coeff = Math.sqrt(2 * H);
-    for (let i = 0; i &lt; nSteps; i++) {
-      const t = (i + 1) * dt;
-      kernel[i] = coeff * Math.pow(t, H - 0.5);
-    }
-
-    // Generate fBM increments
-    const fGn = generateFGN(nSteps, H);
-
-    for (let t = 1; t &lt;= nSteps; t++) {
-      const drift = theta * (mu - path[t - 1]) * dt;
-
-      // Fractional integral: sum_{j=0}^{t-1} K(t-j) * dW_j
-      let fracInt = 0;
-      for (let j = 0; j &lt; t; j++) {
-        fracInt += kernel[t - 1 - j] * fGn[j];
+  for (let iter = 0; iter &lt; maxIter; iter++) {
+    for (let i = 0; i &lt; popSize; i++) {
+      // Build the *complement* index list (everyone except `i`) and
+      // shuffle it so we can pick three distinct bases for the mutation.
+      const indices = [];
+      for (let k = 0; k &lt; popSize; k++) {
+        if (k !== i) indices.push(k);
       }
-      fracInt *= Math.sqrt(dt);
+      const shuffled = shuffle(indices);
+      const a = population[shuffled[0]];
+      const b = population[shuffled[1]];
+      const c = population[shuffled[2]];
 
-      path[t] = path[t - 1] + drift + sigma * fracInt;
+      const trial = [...population[i]];
+      // jRand guarantees at least one coordinate comes from the mutant.
+      const jRand = Math.floor(random() * dim);
+
+      for (let j = 0; j &lt; dim; j++) {
+        if (j === jRand || random() &lt; cr) {
+          trial[j] = a[j] + fScale * (b[j] - c[j]);
+          // Clamp into the feasible box; the bounds `[lb, ub]` are the
+          // simplest hard-constraint strategy and match the paper's tests.
+          if (trial[j] &lt; lb[j]) trial[j] = lb[j];
+          if (trial[j] > ub[j]) trial[j] = ub[j];
+        }
+      }
+
+      const trialValue = f(trial);
+      const currentValue = fVals[i];
+
+      // Greedy one-to-one selection: the trial replaces the parent only
+      // when it scores strictly better on the objective.
+      if (trialValue &lt; currentValue) {
+        population[i] = trial;
+        fVals[i] = trialValue;
+        if (trialValue &lt; bestValue) {
+          bestValue = trialValue;
+          bestIdx = i;
+        }
+      }
     }
   }
 
-  return {path, times};
+  return {x: population[bestIdx], f: bestValue};
 }
 </code></pre>
         </article>
