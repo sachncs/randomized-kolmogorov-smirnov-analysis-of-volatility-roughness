@@ -8,7 +8,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability within RK-SAVR, please send an email to the maintainers via [GitHub Issues](https://github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness/issues). All security vulnerabilities will be promptly addressed.
+If you discover a security vulnerability within RK-SAVR, please send an email to the maintainers via [GitHub Issues](https://github.com/sachncs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness/issues). All security vulnerabilities will be promptly addressed.
 
 **Please do NOT report security vulnerabilities through public GitHub issues.**
 
@@ -47,4 +47,4 @@ We use [Dependabot](https://github.com/dependabot) to keep dependencies up to da
 
 ## Contact
 
-For any security concerns, please open a [private issue](https://github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness/issues) or contact the maintainers directly.
+For any security concerns, please open a [private issue](https://github.com/sachncs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness/issues) or contact the maintainers directly.

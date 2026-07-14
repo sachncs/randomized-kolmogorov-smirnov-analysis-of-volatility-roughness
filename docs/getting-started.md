@@ -18,7 +18,7 @@ npm install rksavr
 ### From Source
 
 ```bash
-git clone https://github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness.git
+git clone https://github.com/sachncs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness.git
 cd randomized-kolmogorov-smirnov-analysis-of-volatility-roughness
 npm install
 ```

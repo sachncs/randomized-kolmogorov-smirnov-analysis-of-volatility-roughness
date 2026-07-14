@@ -256,8 +256,8 @@ When adding new features, update the README with:
 
 ## Community
 
-- **Issues**: [GitHub Issues](https://github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness/discussions)
+- **Issues**: [GitHub Issues](https://github.com/sachncs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/sachncs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness/discussions)
 
 ## License
 

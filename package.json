@@ -11,10 +11,10 @@
       "require": "./dist/index.cjs"
     }
   },
-  "homepage": "https://github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness#readme",
+  "homepage": "https://github.com/sachncs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness#readme",
   "funding": {
     "type": "github",
-    "url": "https://github.com/sponsors/sachn-cs"
+    "url": "https://github.com/sponsors/sachncs"
   },
   "scripts": {
     "dev": "vite demo",
@@ -50,7 +50,7 @@
   "targets": "> 0.25%, not dead",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness.git"
+    "url": "git+ssh://git@github.com/sachncs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness.git"
   },
   "keywords": [
     "kolmogorov-smirnov",
@@ -60,10 +60,10 @@
     "volatility",
     "statistics"
   ],
-  "author": "Sachin",
+  "author": "Sachin <sachncs@gmail.com>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/sachn-cs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness/issues"
+    "url": "https://github.com/sachncs/randomized-kolmogorov-smirnov-analysis-of-volatility-roughness/issues"
   },
   "engines": {
     "node": ">= 18.x"
