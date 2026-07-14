@@ -82,7 +82,7 @@
   "devDependencies": {
     "@babel/cli": "^7.29.7",
     "@babel/core": "^7.23.2",
-    "@babel/preset-env": "^7.29.7",
+    "@babel/preset-env": "^8.0.2",
     "@babel/register": "^7.22.15",
     "@eslint/eslintrc": "^3.3.6",
     "@rollup/plugin-babel": "^7.1.0",
